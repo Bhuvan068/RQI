@@ -1,5 +1,5 @@
 streamlit
-opencv-python-headless
-numpy
+opencv-python-headless==4.7.0.72
+numpy==1.23.5
 pillow
-tflite-runtime==2.11.0
+tflite-runtime==2.9.0
