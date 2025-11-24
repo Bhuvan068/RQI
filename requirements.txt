@@ -2,4 +2,4 @@ streamlit
 opencv-python-headless
 numpy
 pillow
-tensorflow==2.10
+tflite-runtime==2.14.0
