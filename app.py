@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import time
+import requests
 
 # Try TFLite interpreter
 try:
@@ -44,6 +45,22 @@ def detect(frame):
 
 
 # ---------------------------
+# Fetch IP Webcam frame
+# ---------------------------
+def get_ipcam_frame(url):
+    try:
+        r = requests.get(url, timeout=1)
+        if r.status_code != 200:
+            return None
+
+        img_arr = np.frombuffer(r.content, np.uint8)
+        frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+        return frame
+    except:
+        return None
+
+
+# ---------------------------
 # Highlight Lane
 # ---------------------------
 def highlight_lane(frame, x1, y1, x2, y2):
@@ -70,8 +87,8 @@ camera_type = st.sidebar.selectbox(
 ip_url = ""
 if camera_type == "IP Webcam":
     ip_url = st.sidebar.text_input(
-        "Enter IP Webcam URL",
-        "http://192.168.1.5:8080/video"
+        "Enter IP Webcam URL (Use /shot.jpg)",
+        "http://192.168.1.5:8080/shot.jpg"
     )
 
 run_btn = st.sidebar.button("▶ Start Detection")
@@ -87,25 +104,30 @@ if run_btn:
     if camera_type == "Laptop Webcam":
         cap = cv2.VideoCapture(0)
     else:
-        cap = cv2.VideoCapture(ip_url)
+        cap = None  # No VideoCapture for IP Webcam
 
-    if not cap.isOpened():
-        st.error(" Unable to open camera stream.")
-        st.stop()
+    st.sidebar.success("🚀 Running... Press STOP to end.")
 
-    st.sidebar.success(" Running... Press STOP to end.")
-
-    stop_btn = st.sidebar.button(" Stop")
+    stop_btn = st.sidebar.button("⛔ Stop")
 
     while True:
 
         if stop_btn:
             break
 
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Frame not received — check camera!")
-            break
+        # Laptop webcam
+        if camera_type == "Laptop Webcam":
+            ret, frame = cap.read()
+            if not ret:
+                st.error("Frame not received — check webcam!")
+                break
+
+        # IP Webcam frame fetch
+        else:
+            frame = get_ipcam_frame(ip_url)
+            if frame is None:
+                st.error("❌ Unable to read frame from IP Webcam.")
+                break
 
         detections = detect(frame)
 
@@ -117,13 +139,12 @@ if run_btn:
             if score < 0.5:
                 continue
 
-            # Convert normalized → pixel
             x1 = int(x1 * w)
             y1 = int(y1 * h)
             x2 = int(x2 * w)
             y2 = int(y2 * h)
 
-            # Lane class = 0 (change if needed)
+            # Lane class = 0
             if int(cls) == 0:
                 frame = highlight_lane(frame, x1, y1, x2, y2)
                 cv2.putText(frame, f"Lane {score:.2f}", (x1, y1 - 5),
@@ -133,9 +154,9 @@ if run_btn:
                 cv2.putText(frame, f"Obj {score:.2f}", (x1, y1 - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        # Convert BGR → RGB for Streamlit
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         frame_placeholder.image(frame, channels="RGB")
 
-    cap.release()
+    if cap:
+        cap.release()
