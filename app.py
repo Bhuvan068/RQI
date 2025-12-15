@@ -5,6 +5,7 @@ from PIL import Image
 import random
 import sqlite3
 import datetime
+import pandas as pd
 
 st.set_page_config(page_title="RQI — Real-Time YOLO + Lane Detection", layout="wide")
 
@@ -38,8 +39,6 @@ def insert_detection(class_name, confidence, latitude=None, longitude=None):
 # Try import tflite runtime first, fallback to tensorflow
 # --------------------------
 Interpreter = None
-tflite_import_error = None
-
 try:
     from tflite_runtime.interpreter import Interpreter
     st.sidebar.info("Using tflite_runtime.Interpreter")
@@ -50,7 +49,7 @@ except Exception as e1:
         st.sidebar.info("Using tensorflow.lite.Interpreter")
     except Exception as e2:
         Interpreter = None
-        tflite_import_error = (e1, e2)
+        st.error("TFLite interpreter not available.")
 
 # --------------------------
 # CONFIG
@@ -78,7 +77,7 @@ if Interpreter is not None:
         st.error(f"Model failed to load: {ex}")
 
 # --------------------------
-# LANE DETECTION (ULTRA BRIGHT)
+# LANE DETECTION
 # --------------------------
 def enhanced_lane_detection(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -131,12 +130,11 @@ def draw_boxes(frame, boxes, scores, classes, threshold=0.5):
         color = COLORS[class_id]
         label = f"{CLASS_NAMES[class_id]}: {scores[i]:.2f}"
 
-        # Draw on frame
         cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
         cv2.putText(frame, label, (xmin, ymin - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # Insert into SQL
+        # Save detection to SQLite
         insert_detection(CLASS_NAMES[class_id], float(scores[i]))
 
 def run_tflite_inference(frame):
@@ -186,7 +184,7 @@ if mode == "Upload Image":
             st.image(blended, caption="YOLO + Lane Highlight", channels="BGR")
 
 # =====================================================
-# MODE 2 — Live Webcam
+# MODE 2 — Live Webcam / DroidCam
 # =====================================================
 if mode == "Live Webcam":
     if "run_cam" not in st.session_state:
@@ -200,13 +198,14 @@ if mode == "Live Webcam":
     if stop:
         st.session_state.run_cam = False
 
-    cam = cv2.VideoCapture(0)  # Replace 0 with DroidCam IP if needed
+    DROIDCAM_IP = "http://192.168.1.3:4747/video"  # Replace with your DroidCam IP
+    cam = cv2.VideoCapture(DROIDCAM_IP)
     stframe = st.empty()
 
     while st.session_state.run_cam:
         ret, frame = cam.read()
         if not ret:
-            st.error("Camera not found.")
+            st.error("Failed to get video from DroidCam. Check IP & Wi-Fi.")
             break
 
         lanes = enhanced_lane_detection(frame)
@@ -225,7 +224,9 @@ if mode == "Live Webcam":
 # =====================================================
 # Display Detection Log from SQLite
 # =====================================================
-import pandas as pd
 st.subheader("Detection Log")
 df = pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn)
 st.dataframe(df)
+
+st.markdown("**Access your app remotely via ngrok:**")
+st.markdown("[Open Streamlit App](https://unjoyed-georgann-unattemptable.ngrok-free.dev)")
