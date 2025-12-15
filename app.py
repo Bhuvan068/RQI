@@ -5,9 +5,10 @@ from PIL import Image
 import random
 import sqlite3
 import datetime
+import os
 import pandas as pd
 
-st.set_page_config(page_title="RQI — Real-Time YOLO + Lane Detection", layout="wide")
+st.set_page_config(page_title="RQI — YOLO + Lane Detection + GPS", layout="wide")
 
 # --------------------------
 # SQLite Database Setup
@@ -21,22 +22,32 @@ CREATE TABLE IF NOT EXISTS pothole_events (
     timestamp TEXT,
     class_name TEXT,
     confidence REAL,
+    snapshot_path TEXT,
     latitude REAL,
     longitude REAL
 )
 """)
 conn.commit()
 
-def insert_detection(class_name, confidence, latitude=None, longitude=None):
+# --------------------------
+# Snapshots folder
+# --------------------------
+SNAPSHOT_FOLDER = "snapshots"
+os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
+
+# --------------------------
+# Insert detection
+# --------------------------
+def insert_detection(class_name, confidence, snapshot_path, latitude=None, longitude=None):
     timestamp = datetime.datetime.now().isoformat()
     cursor.execute("""
-    INSERT INTO pothole_events (timestamp, class_name, confidence, latitude, longitude)
-    VALUES (?, ?, ?, ?, ?)
-    """, (timestamp, class_name, confidence, latitude, longitude))
+    INSERT INTO pothole_events (timestamp, class_name, confidence, snapshot_path, latitude, longitude)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (timestamp, class_name, confidence, snapshot_path, latitude, longitude))
     conn.commit()
 
 # --------------------------
-# Try import tflite runtime first, fallback to tensorflow
+# TFLite Interpreter
 # --------------------------
 Interpreter = None
 try:
@@ -55,7 +66,7 @@ except Exception as e1:
 # CONFIG
 # --------------------------
 MODEL_PATH = "best_float16.tflite"
-CONF_THRESHOLD = 0.5
+CONF_THRESHOLD = 0.3
 CLASS_NAMES = ["Pothole", "Crack", "Faded Lane"]
 
 # --------------------------
@@ -77,29 +88,25 @@ if Interpreter is not None:
         st.error(f"Model failed to load: {ex}")
 
 # --------------------------
-# LANE DETECTION
+# Lane Detection
 # --------------------------
 def enhanced_lane_detection(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
     white_lower = np.array([0, 0, 180])
     white_upper = np.array([180, 40, 255])
     white_mask = cv2.inRange(hsv, white_lower, white_upper)
-
     yellow_lower = np.array([15, 70, 70])
     yellow_upper = np.array([35, 255, 255])
     yellow_mask = cv2.inRange(hsv, yellow_lower, yellow_upper)
-
     lane_mask = cv2.bitwise_or(white_mask, yellow_mask)
     kernel = np.ones((5, 5), np.uint8)
     lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, kernel)
     lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_OPEN, kernel)
-
     lane_color = cv2.applyColorMap(lane_mask, cv2.COLORMAP_HOT)
     return lane_color
 
 # --------------------------
-# DETECTION UTILITIES
+# Detection utilities
 # --------------------------
 def generate_colors(num_classes):
     random.seed(42)
@@ -114,43 +121,39 @@ def preprocess_for_tflite(frame):
     img = img.astype(np.float32) / 255.0
     return np.expand_dims(img, axis=0)
 
-def draw_boxes(frame, boxes, scores, classes, threshold=0.5):
+def draw_boxes(frame, boxes, scores, classes, latitude=None, longitude=None, threshold=0.3):
     h, w, _ = frame.shape
     for i in range(len(scores)):
         if float(scores[i]) < threshold:
             continue
-
         xmin = int(boxes[i][0] * w)
         ymin = int(boxes[i][1] * h)
         xmax = int(boxes[i][2] * w)
         ymax = int(boxes[i][3] * h)
-
         class_id = int(classes[i])
         class_id = class_id if class_id < len(CLASS_NAMES) else 0
         color = COLORS[class_id]
         label = f"{CLASS_NAMES[class_id]}: {scores[i]:.2f}"
-
         cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
         cv2.putText(frame, label, (xmin, ymin - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        # Save detection to SQLite
-        insert_detection(CLASS_NAMES[class_id], float(scores[i]))
+        # Save snapshot
+        snapshot_path = os.path.join(SNAPSHOT_FOLDER,
+                                     f"{CLASS_NAMES[class_id]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+        cv2.imwrite(snapshot_path, frame[ymin:ymax, xmin:xmax])
+        # Insert into SQLite with GPS
+        insert_detection(CLASS_NAMES[class_id], float(scores[i]), snapshot_path, latitude, longitude)
 
 def run_tflite_inference(frame):
     inp = preprocess_for_tflite(frame)
     interpreter.set_tensor(input_details[0]["index"], inp)
     interpreter.invoke()
-
     out = interpreter.get_tensor(output_details[0]["index"])
     out = np.array(out)
-
     if out.ndim == 3 and out.shape[0] == 1:
         out = out[0]
-
     if out.size == 0:
         return np.zeros((0,4)), np.zeros((0,)), np.zeros((0,))
-
     boxes = out[:, :4]
     scores = out[:, 4]
     classes = out[:, 5]
@@ -159,17 +162,26 @@ def run_tflite_inference(frame):
 # --------------------------
 # STREAMLIT UI
 # --------------------------
-st.title("RQI — Real-Time YOLO + Lane Detection (TFLite)")
+st.title("RQI — Real-Time YOLO + Lane Detection + GPS Snapshots")
 
 if not model_loaded:
     st.error("Model failed to load.")
     st.stop()
 
-mode = st.selectbox("Choose Mode", ["Upload Image", "Live Webcam"])
+mode = st.selectbox("Choose Mode", ["Upload Image", "Live Webcam / DroidCam"])
 
-# =====================================================
+CONF_THRESHOLD = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.3, 0.05)
+
+# --------------------------
+# GPS Input (simulated for testing)
+# --------------------------
+st.sidebar.subheader("Optional GPS Coordinates (for simulation)")
+latitude = st.sidebar.number_input("Latitude", value=0.0, format="%.6f")
+longitude = st.sidebar.number_input("Longitude", value=0.0, format="%.6f")
+
+# --------------------------
 # MODE 1 — Upload Image
-# =====================================================
+# --------------------------
 if mode == "Upload Image":
     uploaded = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
     if uploaded:
@@ -177,28 +189,28 @@ if mode == "Upload Image":
         st.image(frame, caption="Original Image", channels="RGB")
 
         if st.button("Run Detection"):
+            # YOLO detection
+            boxes, scores, classes = run_tflite_inference(frame)
+            draw_boxes(frame, boxes, scores, classes, latitude, longitude, threshold=CONF_THRESHOLD)
+            # Lane overlay after detection
             lanes = enhanced_lane_detection(frame)
             blended = cv2.addWeighted(frame, 0.7, lanes, 0.5, 0)
-            boxes, scores, classes = run_tflite_inference(blended)
-            draw_boxes(blended, boxes, scores, classes, threshold=CONF_THRESHOLD)
-            st.image(blended, caption="YOLO + Lane Highlight", channels="BGR")
+            st.image(blended, caption="YOLO + Lane Highlight + GPS", channels="BGR")
 
-# =====================================================
+# --------------------------
 # MODE 2 — Live Webcam / DroidCam
-# =====================================================
-if mode == "Live Webcam":
+# --------------------------
+if mode == "Live Webcam / DroidCam":
     if "run_cam" not in st.session_state:
         st.session_state.run_cam = False
-
     start = st.button("Start Webcam")
     stop = st.button("Stop Webcam")
-
     if start:
         st.session_state.run_cam = True
     if stop:
         st.session_state.run_cam = False
 
-    DROIDCAM_IP = "http://192.168.1.3:4747/video"  # Replace with your DroidCam IP
+    DROIDCAM_IP = "http://192.168.1.3:4747/video"  # Update with your phone
     cam = cv2.VideoCapture(DROIDCAM_IP)
     stframe = st.empty()
 
@@ -207,23 +219,17 @@ if mode == "Live Webcam":
         if not ret:
             st.error("Failed to get video from DroidCam. Check IP & Wi-Fi.")
             break
-
+        boxes, scores, classes = run_tflite_inference(frame)
+        draw_boxes(frame, boxes, scores, classes, latitude, longitude, threshold=CONF_THRESHOLD)
         lanes = enhanced_lane_detection(frame)
         blended = cv2.addWeighted(frame, 0.7, lanes, 0.5, 0)
-
-        try:
-            boxes, scores, classes = run_tflite_inference(blended)
-            draw_boxes(blended, boxes, scores, classes, threshold=CONF_THRESHOLD)
-        except:
-            pass
-
         stframe.image(blended, channels="BGR")
 
     cam.release()
 
-# =====================================================
-# Display Detection Log from SQLite
-# =====================================================
+# --------------------------
+# Display Detection Log
+# --------------------------
 st.subheader("Detection Log")
 df = pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn)
 st.dataframe(df)
