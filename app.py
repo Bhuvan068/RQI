@@ -7,11 +7,12 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="RQI — YOLO + Lane + Pothole Mask + GPS", layout="wide")
+st.set_page_config(page_title="RQI — YOLO + Lane + Pothole + Heatmap", layout="wide")
 
 # =====================================================
-# SQLite Database Setup
+# DATABASE
 # =====================================================
 conn = sqlite3.connect("potholes.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -30,87 +31,68 @@ CREATE TABLE IF NOT EXISTS pothole_events (
 conn.commit()
 
 # =====================================================
-# Snapshots folder
+# SNAPSHOTS
 # =====================================================
 SNAPSHOT_FOLDER = "snapshots"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 
-def insert_detection(class_name, confidence, snapshot_path, latitude=None, longitude=None):
-    timestamp = datetime.datetime.now().isoformat()
+def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     cursor.execute("""
         INSERT INTO pothole_events
         (timestamp, class_name, confidence, snapshot_path, latitude, longitude)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (timestamp, class_name, confidence, snapshot_path, latitude, longitude))
+    """, (
+        datetime.datetime.now().isoformat(),
+        class_name,
+        confidence,
+        snapshot_path,
+        lat,
+        lon
+    ))
     conn.commit()
 
 # =====================================================
-# TFLite Interpreter
+# TFLITE
 # =====================================================
-Interpreter = None
 try:
     from tflite_runtime.interpreter import Interpreter
-    st.sidebar.success("Using tflite_runtime")
 except:
     import tensorflow as tf
     Interpreter = tf.lite.Interpreter
-    st.sidebar.success("Using tensorflow.lite")
 
-# =====================================================
-# CONFIG
-# =====================================================
 MODEL_PATH = "best_float16.tflite"
 CLASS_NAMES = ["Pothole", "Crack", "Faded Lane"]
 
-# =====================================================
-# Load YOLO TFLite Model
-# =====================================================
 interpreter = Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # =====================================================
-# Lane Detection
+# LANE DETECTION
 # =====================================================
 def enhanced_lane_detection(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    white_mask = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([180, 40, 255]))
-    yellow_mask = cv2.inRange(hsv, np.array([15, 70, 70]), np.array([35, 255, 255]))
-    lane_mask = cv2.bitwise_or(white_mask, yellow_mask)
-
-    kernel = np.ones((5, 5), np.uint8)
-    lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, kernel)
-    lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_OPEN, kernel)
-
-    return cv2.applyColorMap(lane_mask, cv2.COLORMAP_HOT)
+    white = cv2.inRange(hsv, (0,0,180), (180,40,255))
+    yellow = cv2.inRange(hsv, (15,70,70), (35,255,255))
+    mask = cv2.bitwise_or(white, yellow)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
+    return cv2.applyColorMap(mask, cv2.COLORMAP_HOT)
 
 # =====================================================
-# NEW: Pothole Mask (NO TRAINING)
+# POTHOLE MASK (NO TRAINING)
 # =====================================================
 def pothole_mask_no_training(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (7, 7), 0)
-
-    # Dark-region detection
+    blur = cv2.GaussianBlur(gray, (7,7), 0)
     _, mask = cv2.threshold(blur, 90, 255, cv2.THRESH_BINARY_INV)
-
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5),np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
     return mask
 
 # =====================================================
-# YOLO Utilities
+# YOLO HELPERS
 # =====================================================
-def generate_colors(n):
-    random.seed(42)
-    return [tuple(random.randint(0,255) for _ in range(3)) for _ in range(n)]
-
-COLORS = generate_colors(len(CLASS_NAMES))
-
 def preprocess_for_tflite(frame):
     h, w = input_details[0]["shape"][1:3]
     img = cv2.resize(frame, (w, h))
@@ -123,107 +105,131 @@ def run_tflite_inference(frame):
     interpreter.set_tensor(input_details[0]["index"], inp)
     interpreter.invoke()
     out = interpreter.get_tensor(output_details[0]["index"])[0]
-
     if out.size == 0:
         return [], [], []
-
     return out[:, :4], out[:, 4], out[:, 5]
+
+COLORS = [(255,0,0),(0,255,0),(0,0,255)]
 
 def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
     h, w, _ = frame.shape
     for i in range(len(scores)):
         if scores[i] < threshold:
             continue
-
-        x1, y1, x2, y2 = boxes[i]
-        x1, x2 = int(x1*w), int(x2*w)
-        y1, y2 = int(y1*h), int(y2*h)
+        x1,y1,x2,y2 = boxes[i]
+        x1,x2 = int(x1*w), int(x2*w)
+        y1,y2 = int(y1*h), int(y2*h)
 
         cid = int(classes[i])
         color = COLORS[cid % len(COLORS)]
-        label = f"{CLASS_NAMES[cid]} {scores[i]:.2f}"
-
-        cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-        cv2.putText(frame, label, (x1, y1-5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
 
         crop = frame[y1:y2, x1:x2]
-        snap = f"{SNAPSHOT_FOLDER}/{CLASS_NAMES[cid]}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         if crop.size > 0:
-            cv2.imwrite(snap, crop)
-            insert_detection(CLASS_NAMES[cid], float(scores[i]), snap, lat, lon)
+            path = f"{SNAPSHOT_FOLDER}/{CLASS_NAMES[cid]}_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
+            cv2.imwrite(path, crop)
+            insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
 
 # =====================================================
 # UI
 # =====================================================
-st.title("RQI — YOLO + Lane + Pothole Mask (Ather-style)")
+st.title("🚧 RQI — Ather-style Pothole Intelligence")
 
-mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
+mode = st.selectbox("Mode", ["Upload Image", "Live Webcam / DroidCam"])
 conf = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.3, 0.05)
 
-st.sidebar.subheader("GPS (Optional)")
+st.sidebar.subheader("GPS")
 latitude = st.sidebar.number_input("Latitude", 0.0, format="%.6f")
 longitude = st.sidebar.number_input("Longitude", 0.0, format="%.6f")
 
 # =====================================================
-# UPLOAD IMAGE MODE (DUAL OUTPUT)
+# UPLOAD IMAGE MODE
 # =====================================================
 if mode == "Upload Image":
-    uploaded = st.file_uploader("Upload Road Image", type=["jpg","png","jpeg"])
+    file = st.file_uploader("Upload Road Image", ["jpg","png","jpeg"])
+    if file and st.button("Run Detection"):
+        frame = np.array(Image.open(file).convert("RGB"))
 
-    if uploaded and st.button("Run Detection"):
-        frame = np.array(Image.open(uploaded).convert("RGB"))
-
-        # YOLO + Lane
         yolo_frame = frame.copy()
-        boxes, scores, classes = run_tflite_inference(yolo_frame)
+        boxes,scores,classes = run_tflite_inference(yolo_frame)
         draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+
         lanes = enhanced_lane_detection(yolo_frame)
-        left_img = cv2.addWeighted(yolo_frame, 0.7, lanes, 0.5, 0)
+        left = cv2.addWeighted(yolo_frame,0.7,lanes,0.5,0)
 
-        # Pothole Mask
         mask = pothole_mask_no_training(frame)
-        mask_col = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        right = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Lane + YOLO Detection")
-            st.image(left_img, channels="BGR")
-
-        with col2:
-            st.subheader("Pothole Mask (No Training)")
-            st.image(mask_col, channels="BGR")
+        c1,c2 = st.columns(2)
+        c1.image(left, caption="YOLO + Lane", channels="BGR")
+        c2.image(right, caption="Pothole Mask", channels="BGR")
 
 # =====================================================
-# LIVE WEBCAM / DROIDCAM
+# LIVE CAMERA
 # =====================================================
 if mode == "Live Webcam / DroidCam":
-    cam_url = st.text_input("Camera Source", "http://192.168.1.3:4747/video")
-    run = st.checkbox("Start Camera")
-
-    if run:
-        cap = cv2.VideoCapture(cam_url)
-        frame_box = st.empty()
-
+    url = st.text_input("Camera URL", "http://192.168.1.3:4747/video")
+    start = st.checkbox("Start Camera")
+    if start:
+        cap = cv2.VideoCapture(url)
+        box = st.empty()
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                st.error("Camera not accessible")
                 break
-
-            boxes, scores, classes = run_tflite_inference(frame)
+            boxes,scores,classes = run_tflite_inference(frame)
             draw_boxes(frame, boxes, scores, classes, latitude, longitude, conf)
             lanes = enhanced_lane_detection(frame)
-            blended = cv2.addWeighted(frame, 0.7, lanes, 0.5, 0)
-
-            frame_box.image(blended, channels="BGR")
-
+            blend = cv2.addWeighted(frame,0.7,lanes,0.5,0)
+            box.image(blend, channels="BGR")
         cap.release()
 
 # =====================================================
-# DATABASE VIEW
+# DATABASE TABLE
 # =====================================================
-st.subheader("Detection Log")
+st.subheader("📋 Detection Log")
 df = pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn)
 st.dataframe(df)
+
+# =====================================================
+# OPENSTREETMAP + HEATMAP
+# =====================================================
+st.subheader("🗺️ Pothole Density Map (Heatmap)")
+
+map_df = pd.read_sql("""
+SELECT latitude, longitude, class_name, timestamp
+FROM pothole_events
+WHERE latitude != 0 AND longitude != 0
+""", conn)
+
+if not map_df.empty:
+    heat_points = ",".join([
+        f"[{r.latitude}, {r.longitude}, 0.8]"
+        for _, r in map_df.iterrows()
+    ])
+
+    components.html(f"""
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+
+    <div id="map" style="height:520px;"></div>
+
+    <script>
+      var map = L.map('map').setView(
+        [{map_df.latitude.mean()}, {map_df.longitude.mean()}], 15
+      );
+
+      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+        attribution: '© OpenStreetMap'
+      }}).addTo(map);
+
+      var heat = L.heatLayer([{heat_points}], {{
+        radius: 25,
+        blur: 15,
+        maxZoom: 17
+      }}).addTo(map);
+    </script>
+    """, height=540)
+else:
+    st.info("No GPS data available for map.")
