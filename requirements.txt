@@ -1,8 +1,8 @@
 streamlit
-opencv-python
+tensorflow
+opencv-python-headless
 numpy
 pillow
 pandas
-tflite-runtime
 streamlit-folium
 folium
