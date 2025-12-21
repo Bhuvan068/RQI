@@ -8,7 +8,10 @@ import os
 import pandas as pd
 from streamlit_folium import st_folium
 import folium
-import geocoder
+
+# Install streamlit_javascript if not already installed
+# pip install streamlit-javascript
+from streamlit_javascript import st_javascript
 
 st.set_page_config(page_title="RQI — YOLO + DeepLaneNet + Map", layout="wide")
 
@@ -69,7 +72,7 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # =====================================================
-# LANE DETECTION FUNCTION (DeepLaneNet placeholder)
+# LANE DETECTION FUNCTION (placeholder)
 # =====================================================
 def deep_lane_detection(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -123,10 +126,23 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
 
 # =====================================================
-# AUTO DETECT USER LOCATION
+# GET USER LOCATION VIA BROWSER
 # =====================================================
-g = geocoder.ip('me')
-user_lat, user_lon = g.latlng if g.ok else (20.5937, 78.9629)  # Default India
+location_js = """
+async function getLocation(){
+  return new Promise((resolve,reject)=>{
+    if(navigator.geolocation){
+        navigator.geolocation.getCurrentPosition(
+            pos => resolve([pos.coords.latitude,pos.coords.longitude]),
+            err => resolve([20.5937, 78.9629]) // fallback to India
+        );
+    } else { resolve([20.5937, 78.9629]); }
+  });
+}
+getLocation();
+"""
+user_lat, user_lon = st_javascript(location_js)
+st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
 
 # =====================================================
 # UI
@@ -135,7 +151,6 @@ st.title("🚧 RQI — YOLO + DeepLaneNet + Map")
 
 mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
 conf = st.sidebar.slider("Confidence Threshold",0.1,1.0,0.3,0.05)
-st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
 
 # ================= UPLOAD IMAGE MODE =================
 if mode=="Upload Image":
@@ -143,18 +158,15 @@ if mode=="Upload Image":
     if uploaded and st.button("Run Detection"):
         frame = np.array(Image.open(uploaded).convert("RGB"))
         
-        # DeepLaneNet Detection
         lane_img, lane_found = deep_lane_detection(frame)
         if not lane_found:
             st.warning("⚠️ Lane Missing!")
             insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
         
-        # YOLO Detection
         yolo_frame = frame.copy()
         boxes,scores,classes = run_tflite_inference(yolo_frame)
         draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
 
-        # Show side-by-side
         col1, col2 = st.columns(2)
         col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
         col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
@@ -177,17 +189,14 @@ if mode=="Live Webcam / DroidCam":
                     st.error("Camera not accessible")
                     break
 
-                # DeepLaneNet
                 lane_img, lane_found = deep_lane_detection(frame)
                 if not lane_found:
                     insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
 
-                # YOLO
                 yolo_frame = frame.copy()
                 boxes,scores,classes = run_tflite_inference(yolo_frame)
                 draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
 
-                # Display
                 col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
                 col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
 
@@ -213,4 +222,4 @@ for _, row in df.iterrows():
                       popup=f"{row['class_name']} ({row['confidence']:.2f})",
                       icon=folium.Icon(color='red', icon='info-sign')).add_to(m)
 
-st_data = st_folium(m, width=700, height=500)
+st_folium(m, width=700, height=500)
