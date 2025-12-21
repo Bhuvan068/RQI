@@ -74,21 +74,17 @@ def enhanced_lane_detection(frame):
     white = cv2.inRange(hsv, (0, 0, 180), (180, 40, 255))
     yellow = cv2.inRange(hsv, (15, 70, 70), (35, 255, 255))
     mask = cv2.bitwise_or(white, yellow)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
     return mask
 
 def lanes_are_continuous(mask, max_gap=20):
     """
-    Checks if lane markings are continuous.
-    Args:
-        mask: binary lane mask
-        max_gap: max number of consecutive zeros allowed in a lane row
-    Returns:
-        True if continuous, False if any lane has a gap > max_gap
+    Internal logic only (NO visualization)
+    Returns False if any lane row has large gaps
     """
     h, w = mask.shape
     for y in range(h):
-        row = mask[y, :]
+        row = mask[y]
         lane_pixels = np.where(row > 0)[0]
         if len(lane_pixels) < 2:
             continue
@@ -96,25 +92,6 @@ def lanes_are_continuous(mask, max_gap=20):
         if np.max(gaps) > max_gap:
             return False
     return True
-
-def lane_continuity_visual(mask, max_gap=20):
-    """
-    Visualize lane continuity: green if continuous, red if broken.
-    """
-    h, w = mask.shape
-    visual = np.zeros((h, w, 3), dtype=np.uint8)
-    for y in range(h):
-        row = mask[y, :]
-        lane_pixels = np.where(row > 0)[0]
-        if len(lane_pixels) < 2:
-            visual[y, :] = (0, 0, 255)  # red if no lane
-            continue
-        gaps = np.diff(lane_pixels)
-        if np.max(gaps) <= max_gap:
-            visual[y, :] = (0, 255, 0)  # green if continuous
-        else:
-            visual[y, :] = (0, 0, 255)  # red if broken
-    return visual
 
 # =====================================================
 # YOLO HELPERS
@@ -140,6 +117,7 @@ COLORS = [(0,255,0),(255,255,0),(255,0,255)]
 def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
     h, w, _ = frame.shape
     detected_positions = []
+
     for i in range(len(scores)):
         if scores[i] < threshold:
             continue
@@ -149,7 +127,7 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
         y1,y2 = int(y1*h), int(y2*h)
 
         cid = int(classes[i])
-        cv2.rectangle(frame, (x1,y1), (x2,y2), COLORS[cid%3], 2)
+        cv2.rectangle(frame, (x1,y1), (x2,y2), COLORS[cid % 3], 2)
 
         crop = frame[y1:y2, x1:x2]
         if crop.size > 0:
@@ -157,6 +135,7 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             cv2.imwrite(path, crop)
             insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
             detected_positions.append((lat, lon))
+
     return detected_positions
 
 # =====================================================
@@ -180,19 +159,21 @@ if mode == "Upload Image":
     if uploaded and st.button("Run Detection"):
         frame = np.array(Image.open(uploaded).convert("RGB"))
 
-        # First image: YOLO + Lane overlay
         yolo_frame = frame.copy()
         boxes, scores, classes = run_tflite_inference(yolo_frame)
-        draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+
         lane_mask = enhanced_lane_detection(yolo_frame)
-        yolo_lane_img = cv2.addWeighted(yolo_frame, 0.7, cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0)
 
-        # Second image: Lane continuity visualization
-        lane_cont_img = lane_continuity_visual(lane_mask)
+        # Detect potholes ONLY if lanes continuous
+        if lanes_are_continuous(lane_mask):
+            draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
 
-        col1, col2 = st.columns(2)
-        col1.image(yolo_lane_img, caption="YOLO + Lane Overlay", channels="BGR")
-        col2.image(lane_cont_img, caption="Lane Continuity Visualization", channels="BGR")
+        overlay = cv2.addWeighted(
+            yolo_frame, 0.7,
+            cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
+        )
+
+        st.image(overlay, caption="YOLO + Lane Overlay", channels="BGR")
 
 # =====================================================
 # LIVE CAMERA MODE
@@ -203,8 +184,7 @@ if mode == "Live Webcam / DroidCam":
 
     if start:
         cap = cv2.VideoCapture(cam_url)
-        frame_box1 = st.empty()  # YOLO + lane overlay
-        frame_box2 = st.empty()  # Lane continuity
+        frame_box = st.empty()
         map_box = st.empty()
         detected_coords = []
 
@@ -215,18 +195,25 @@ if mode == "Live Webcam / DroidCam":
                 break
 
             lane_mask = enhanced_lane_detection(frame)
-            lane_cont_img = lane_continuity_visual(lane_mask)
 
-            # Only detect potholes if lanes are continuous
+            # Detect + map ONLY if lanes continuous
             if lanes_are_continuous(lane_mask):
-                coords = draw_boxes(frame, *run_tflite_inference(frame), latitude, longitude, conf)
+                coords = draw_boxes(
+                    frame,
+                    *run_tflite_inference(frame),
+                    latitude,
+                    longitude,
+                    conf
+                )
                 detected_coords.extend(coords)
 
-            blended = cv2.addWeighted(frame, 0.7, cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0)
-            frame_box1.image(blended, channels="BGR")
-            frame_box2.image(lane_cont_img, caption="Lane Continuity Visualization", channels="BGR")
+            overlay = cv2.addWeighted(
+                frame, 0.7,
+                cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
+            )
 
-            # Show detected potholes on map
+            frame_box.image(overlay, channels="BGR")
+
             if detected_coords:
                 map_df = pd.DataFrame(detected_coords, columns=["lat", "lon"])
                 map_box.map(map_df)
