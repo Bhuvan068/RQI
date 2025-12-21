@@ -8,10 +8,7 @@ import os
 import pandas as pd
 from streamlit_folium import st_folium
 import folium
-
-# Install streamlit_javascript if not already installed
-# pip install streamlit-javascript
-from streamlit_javascript import st_javascript
+import geocoder
 
 st.set_page_config(page_title="RQI — YOLO + DeepLaneNet + Map", layout="wide")
 
@@ -126,22 +123,10 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
 
 # =====================================================
-# GET USER LOCATION VIA BROWSER
+# AUTO DETECT USER LOCATION (IP-based)
 # =====================================================
-location_js = """
-async function getLocation(){
-  return new Promise((resolve,reject)=>{
-    if(navigator.geolocation){
-        navigator.geolocation.getCurrentPosition(
-            pos => resolve([pos.coords.latitude,pos.coords.longitude]),
-            err => resolve([20.5937, 78.9629]) // fallback to India
-        );
-    } else { resolve([20.5937, 78.9629]); }
-  });
-}
-getLocation();
-"""
-user_lat, user_lon = st_javascript(location_js)
+g = geocoder.ip('me')
+user_lat, user_lon = g.latlng if g.ok else (20.5937, 78.9629)  # Default India
 st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
 
 # =====================================================
@@ -174,32 +159,35 @@ if mode=="Upload Image":
 # ================= LIVE CAMERA MODE =================
 if mode=="Live Webcam / DroidCam":
     st.info("Use a ngrok public URL here if running on Streamlit Cloud")
-    cam_url = st.text_input("Camera URL","http://192.168.1.3:4747/video")
+    cam_url = st.text_input("Camera URL","http://example.ngrok.io/video")
     start = st.checkbox("Start Camera")
 
     if start:
         col1, col2 = st.columns(2)
-        cap = cv2.VideoCapture(cam_url)
-        if not cap.isOpened():
-            st.error("Cannot access camera. Check URL or ngrok link.")
-        else:
-            while cap.isOpened():
-                ret,frame = cap.read()
-                if not ret:
-                    st.error("Camera not accessible")
-                    break
+        try:
+            cap = cv2.VideoCapture(cam_url)
+            if not cap.isOpened():
+                st.error("Cannot access camera. Check URL or ngrok link.")
+            else:
+                while cap.isOpened():
+                    ret,frame = cap.read()
+                    if not ret:
+                        st.error("Camera not accessible")
+                        break
 
-                lane_img, lane_found = deep_lane_detection(frame)
-                if not lane_found:
-                    insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
+                    lane_img, lane_found = deep_lane_detection(frame)
+                    if not lane_found:
+                        insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
 
-                yolo_frame = frame.copy()
-                boxes,scores,classes = run_tflite_inference(yolo_frame)
-                draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
+                    yolo_frame = frame.copy()
+                    boxes,scores,classes = run_tflite_inference(yolo_frame)
+                    draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
 
-                col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
-                col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
-
+                    col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
+                    col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
+        except Exception as e:
+            st.error(f"Error accessing camera: {e}")
+        finally:
             cap.release()
 
 # ================= DATABASE VIEW =================
