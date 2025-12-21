@@ -77,20 +77,43 @@ def enhanced_lane_detection(frame):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
     return mask
 
-def lanes_are_continuous(mask, threshold=0.8):
-    """Return True if lane markings are continuous horizontally (per row)."""
+def lanes_are_continuous(mask, max_gap=20):
+    """
+    Checks if lane markings are continuous.
+    Args:
+        mask: binary lane mask
+        max_gap: max number of consecutive zeros allowed in a lane row
+    Returns:
+        True if continuous, False if any lane has a gap > max_gap
+    """
     h, w = mask.shape
-    row_sum = np.sum(mask > 0, axis=1) / w  # fraction of lane pixels per row
-    return np.all(row_sum > threshold)
+    for y in range(h):
+        row = mask[y, :]
+        lane_pixels = np.where(row > 0)[0]
+        if len(lane_pixels) < 2:
+            continue
+        gaps = np.diff(lane_pixels)
+        if np.max(gaps) > max_gap:
+            return False
+    return True
 
-def lane_continuity_visual(mask, threshold=0.8):
-    """Visualize lane continuity: green if continuous, red if broken."""
+def lane_continuity_visual(mask, max_gap=20):
+    """
+    Visualize lane continuity: green if continuous, red if broken.
+    """
     h, w = mask.shape
     visual = np.zeros((h, w, 3), dtype=np.uint8)
-    row_sum = np.sum(mask > 0, axis=1) / w
-    for i in range(h):
-        color = (0, 255, 0) if row_sum[i] > threshold else (0, 0, 255)
-        visual[i, :] = color
+    for y in range(h):
+        row = mask[y, :]
+        lane_pixels = np.where(row > 0)[0]
+        if len(lane_pixels) < 2:
+            visual[y, :] = (0, 0, 255)  # red if no lane
+            continue
+        gaps = np.diff(lane_pixels)
+        if np.max(gaps) <= max_gap:
+            visual[y, :] = (0, 255, 0)  # green if continuous
+        else:
+            visual[y, :] = (0, 0, 255)  # red if broken
     return visual
 
 # =====================================================
