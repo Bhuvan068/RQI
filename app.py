@@ -8,6 +8,7 @@ import os
 import pandas as pd
 from streamlit_folium import st_folium
 import folium
+import geocoder
 
 st.set_page_config(page_title="RQI — YOLO + DeepLaneNet + Map", layout="wide")
 
@@ -71,24 +72,17 @@ output_details = interpreter.get_output_details()
 # LANE DETECTION FUNCTION (DeepLaneNet placeholder)
 # =====================================================
 def deep_lane_detection(frame):
-    """
-    Placeholder for actual DeepLaneNet lane detection.
-    Returns lane image and lane_found boolean.
-    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5,5), 0)
     edges = cv2.Canny(blur, 50, 150)
-    
     lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50, minLineLength=100, maxLineGap=50)
     lane_img = np.zeros_like(frame)
     
     if lines is None or len(lines)==0:
-        return lane_img, False  # Lane missing
-    
+        return lane_img, False
     for line in lines:
         x1,y1,x2,y2 = line[0]
         cv2.line(lane_img,(x1,y1),(x2,y2),(0,255,0),5)
-    
     return lane_img, True
 
 # =====================================================
@@ -129,15 +123,19 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
 
 # =====================================================
+# AUTO DETECT USER LOCATION
+# =====================================================
+g = geocoder.ip('me')
+user_lat, user_lon = g.latlng if g.ok else (20.5937, 78.9629)  # Default India
+
+# =====================================================
 # UI
 # =====================================================
 st.title("🚧 RQI — YOLO + DeepLaneNet + Map")
 
 mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
 conf = st.sidebar.slider("Confidence Threshold",0.1,1.0,0.3,0.05)
-st.sidebar.subheader("GPS (required for map)")
-latitude = st.sidebar.number_input("Latitude",0.0,format="%.6f")
-longitude = st.sidebar.number_input("Longitude",0.0,format="%.6f")
+st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
 
 # ================= UPLOAD IMAGE MODE =================
 if mode=="Upload Image":
@@ -149,12 +147,12 @@ if mode=="Upload Image":
         lane_img, lane_found = deep_lane_detection(frame)
         if not lane_found:
             st.warning("⚠️ Lane Missing!")
-            insert_detection("Lane Missing", 0.0, "", latitude, longitude)
+            insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
         
         # YOLO Detection
         yolo_frame = frame.copy()
         boxes,scores,classes = run_tflite_inference(yolo_frame)
-        draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+        draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
 
         # Show side-by-side
         col1, col2 = st.columns(2)
@@ -182,12 +180,12 @@ if mode=="Live Webcam / DroidCam":
                 # DeepLaneNet
                 lane_img, lane_found = deep_lane_detection(frame)
                 if not lane_found:
-                    insert_detection("Lane Missing", 0.0, "", latitude, longitude)
+                    insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
 
                 # YOLO
                 yolo_frame = frame.copy()
                 boxes,scores,classes = run_tflite_inference(yolo_frame)
-                draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+                draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
 
                 # Display
                 col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
@@ -202,7 +200,7 @@ st.dataframe(df)
 
 # ================= MAP VIEW =================
 st.subheader("🗺️ Map of Detections")
-map_center = [latitude, longitude] if latitude !=0 and longitude !=0 else [20.5937,78.9629]  # Default India
+map_center = [user_lat, user_lon]
 m = folium.Map(location=map_center, zoom_start=14)
 
 for _, row in df.iterrows():
