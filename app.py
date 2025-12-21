@@ -136,14 +136,20 @@ if mode=="Upload Image":
 if mode=="Live Webcam / DroidCam":
     st.info("Use a ngrok public URL if running on Streamlit Cloud")
     cam_url = st.text_input("Camera URL","http://192.168.1.3:4747/video")
-    start = st.checkbox("Start Camera")
-    if start:
-        col1, col2 = st.columns(2)
+    start_button = st.button("Start Camera")
+    stop_button = st.button("Stop Camera")
+    frame_box1 = st.empty()
+    frame_box2 = st.empty()
+
+    if start_button:
         cap = cv2.VideoCapture(cam_url)
         if not cap.isOpened():
             st.error("Cannot access camera. Check URL or ngrok link.")
         else:
             while cap.isOpened():
+                if stop_button:
+                    cap.release()
+                    break
                 ret, frame = cap.read()
                 if not ret:
                     st.error("Camera not accessible")
@@ -151,8 +157,8 @@ if mode=="Live Webcam / DroidCam":
                 boxes,scores,classes = run_tflite_inference(frame)
                 draw_boxes(frame, boxes, scores, classes, latitude, longitude, conf)
                 lanes = enhanced_lane_detection(frame)
-                col1.image(lanes, caption="Lane Detection (B/W)", channels="BGR")
-                col2.image(frame, caption="YOLO Detection", channels="BGR")
+                frame_box1.image(lanes, caption="Lane Detection (B/W)", channels="BGR")
+                frame_box2.image(frame, caption="YOLO Detection", channels="BGR")
             cap.release()
 
 # ================= DATABASE VIEW =================
