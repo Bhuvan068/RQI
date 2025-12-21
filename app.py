@@ -7,7 +7,7 @@ import datetime
 import os
 import pandas as pd
 
-st.set_page_config(page_title="RQI — YOLO + Lane + Red Potholes", layout="wide")
+st.set_page_config(page_title="RQI — YOLO + Lane Detection", layout="wide")
 
 # =====================================================
 # DATABASE
@@ -77,41 +77,6 @@ def enhanced_lane_detection(frame):
     return cv2.applyColorMap(mask, cv2.COLORMAP_HOT)
 
 # =====================================================
-# WATER-SAFE POTHOLE MASK
-# =====================================================
-def pothole_mask_water_safe(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    h,s,v = cv2.split(hsv)
-    dark = cv2.inRange(v, 0, 130)
-    low_sat = cv2.inRange(s, 0, 90)
-    base_mask = cv2.bitwise_and(dark, low_sat)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    lap = cv2.Laplacian(gray, cv2.CV_64F)
-    lap = cv2.convertScaleAbs(lap)
-    _, texture = cv2.threshold(lap,20,255,cv2.THRESH_BINARY)
-    mask = cv2.bitwise_and(base_mask, texture)
-    kernel = np.ones((7,7), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    final = np.zeros_like(mask)
-    contours,_ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for c in contours:
-        area = cv2.contourArea(c)
-        if 600 < area < 40000:
-            cv2.drawContours(final,[c],-1,255,-1)
-    return final
-
-# =====================================================
-# COLOR POTHOLES RED
-# =====================================================
-def color_potholes_red(original, mask):
-    result = original.copy()
-    red_layer = np.zeros_like(original)
-    red_layer[:,:,2] = 255
-    result[mask==255] = cv2.addWeighted(original,0.2,red_layer,0.8,0)[mask==255]
-    return result
-
-# =====================================================
 # YOLO HELPERS
 # =====================================================
 def preprocess_for_tflite(frame):
@@ -169,11 +134,7 @@ if mode=="Upload Image":
         draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
         lanes = enhanced_lane_detection(yolo_frame)
         left_img = cv2.addWeighted(yolo_frame,0.7,lanes,0.5,0)
-        pothole_mask = pothole_mask_water_safe(frame)
-        right_img = color_potholes_red(frame, pothole_mask)
-        col1,col2 = st.columns(2)
-        col1.image(left_img,caption="YOLO + Lane Overlay",channels="BGR")
-        col2.image(right_img,caption="Potholes Highlighted (RED)",channels="BGR")
+        st.image(left_img,caption="YOLO + Lane Overlay",channels="BGR")
 
 # ================= LIVE CAMERA MODE =================
 if mode=="Live Webcam / DroidCam":
@@ -194,8 +155,6 @@ if mode=="Live Webcam / DroidCam":
                     break
                 boxes,scores,classes = run_tflite_inference(frame)
                 draw_boxes(frame, boxes, scores, classes, latitude, longitude, conf)
-                pothole_mask = pothole_mask_water_safe(frame)
-                frame = color_potholes_red(frame, pothole_mask)
                 lanes = enhanced_lane_detection(frame)
                 blended = cv2.addWeighted(frame,0.7,lanes,0.5,0)
                 frame_box.image(blended,channels="BGR")
