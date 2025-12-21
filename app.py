@@ -8,7 +8,7 @@ import os
 import pandas as pd
 from streamlit_folium import st_folium
 import folium
-import geocoder
+import requests
 
 st.set_page_config(page_title="RQI — YOLO + DeepLaneNet + Map", layout="wide")
 
@@ -125,8 +125,16 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
 # =====================================================
 # AUTO DETECT USER LOCATION (IP-based)
 # =====================================================
-g = geocoder.ip('me')
-user_lat, user_lon = g.latlng if g.ok else (20.5937, 78.9629)  # Default India
+def get_user_location():
+    try:
+        res = requests.get("https://ipinfo.io/json")
+        data = res.json()
+        lat, lon = map(float, data["loc"].split(","))
+        return lat, lon
+    except:
+        return 20.5937, 78.9629  # fallback to India
+
+user_lat, user_lon = get_user_location()
 st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
 
 # =====================================================
