@@ -1,10 +1,10 @@
 streamlit
-tensorflow
 opencv-python-headless
 numpy
 pillow
 pandas
 tflite-runtime
-geocoder
 folium
 streamlit-folium
+streamlit-javascript
+tensorflow
