@@ -6,4 +6,4 @@ pandas
 tensorflow
 folium
 streamlit-folium
-geocoder
+requests
