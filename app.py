@@ -6,9 +6,8 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
-from streamlit_folium import st_folium
 import folium
-import requests
+from streamlit_folium import st_folium
 
 st.set_page_config(page_title="RQI — YOLO + Lane Detection + Map", layout="wide")
 
@@ -37,22 +36,23 @@ SNAPSHOT_FOLDER = "snapshots"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 
 def insert_detection(class_name, confidence, snapshot_path, lat, lon):
-    cursor.execute("""
-        INSERT INTO pothole_events
-        (timestamp, class_name, confidence, snapshot_path, latitude, longitude)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        datetime.datetime.now().isoformat(),
-        class_name,
-        confidence,
-        snapshot_path,
-        lat,
-        lon
-    ))
-    conn.commit()
+    if lat is not None and lon is not None:  # Only insert if coordinates are provided
+        cursor.execute("""
+            INSERT INTO pothole_events
+            (timestamp, class_name, confidence, snapshot_path, latitude, longitude)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.datetime.now().isoformat(),
+            class_name,
+            confidence,
+            snapshot_path,
+            lat,
+            lon
+        ))
+        conn.commit()
 
 # =====================================================
-# LOAD TFLITE YOLO MODEL
+# LOAD TFLITE
 # =====================================================
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -69,20 +69,19 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # =====================================================
-# LANE DETECTION FUNCTION (DeepLaneNet placeholder)
+# SIMPLE LANE DETECTION (color thresholding)
 # =====================================================
-def deep_lane_detection(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50, minLineLength=100, maxLineGap=50)
-    lane_img = np.zeros_like(frame)
-    if lines is None or len(lines) == 0:
-        return lane_img, False
-    for line in lines:
-        x1,y1,x2,y2 = line[0]
-        cv2.line(lane_img, (x1,y1), (x2,y2), (0,255,0), 5)
-    return lane_img, True
+def enhanced_lane_detection(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # White mask
+    white = cv2.inRange(hsv, (0,0,180), (180,40,255))
+    # Yellow mask
+    yellow = cv2.inRange(hsv, (15,70,70), (35,255,255))
+    mask = cv2.bitwise_or(white, yellow)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
+    lane_img = cv2.bitwise_and(frame, frame, mask=mask)
+    lane_found = np.any(mask)
+    return lane_img, lane_found
 
 # =====================================================
 # YOLO HELPERS
@@ -122,56 +121,43 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
 
 # =====================================================
-# AUTO DETECT USER LOCATION (IP-based)
-# =====================================================
-def get_user_location():
-    try:
-        res = requests.get("https://ipinfo.io/json")
-        data = res.json()
-        lat, lon = map(float, data["loc"].split(","))
-        return lat, lon
-    except:
-        return 20.5937, 78.9629  # fallback India
-
-user_lat, user_lon = get_user_location()
-st.sidebar.write(f"Detected Location: Latitude={user_lat:.6f}, Longitude={user_lon:.6f}")
-
-# =====================================================
 # UI
 # =====================================================
-st.title("🚧 RQI — YOLO + DeepLaneNet + Map")
+st.title("🚧 RQI — YOLO + Lane Detection + Map")
+
 mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
-conf = st.sidebar.slider("Confidence Threshold", 0.1,1.0,0.3,0.05)
+conf = st.sidebar.slider("Confidence Threshold",0.1,1.0,0.3,0.05)
+st.sidebar.subheader("GPS (optional)")
+latitude = st.sidebar.number_input("Latitude",0.0,format="%.6f")
+longitude = st.sidebar.number_input("Longitude",0.0,format="%.6f")
 
 # ================= UPLOAD IMAGE MODE =================
-if mode == "Upload Image":
-    uploaded = st.file_uploader("Upload Road Image", ["jpg","png","jpeg"])
+if mode=="Upload Image":
+    uploaded = st.file_uploader("Upload Road Image",["jpg","png","jpeg"])
     if uploaded and st.button("Run Detection"):
         frame = np.array(Image.open(uploaded).convert("RGB"))
-
-        # DeepLaneNet Detection
-        lane_img, lane_found = deep_lane_detection(frame)
-        if not lane_found:
-            st.warning("⚠️ Lane Missing!")
-            insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
-
-        # YOLO Detection
+        # YOLO
         yolo_frame = frame.copy()
         boxes,scores,classes = run_tflite_inference(yolo_frame)
-        draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
-
-        # Side-by-side display
-        col1, col2 = st.columns(2)
-        col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
-        col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
+        draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+        # Lane detection
+        lanes, lane_found = enhanced_lane_detection(frame)
+        if not lane_found:
+            st.warning("⚠️ Lane Missing!")
+            insert_detection("Lane Missing",0.0,"",latitude,longitude)
+        # Show side by side
+        col1,col2 = st.columns(2)
+        col1.image(lanes,caption="Lane Overlay",channels="BGR")
+        col2.image(yolo_frame,caption="YOLO Detection",channels="BGR")
 
 # ================= LIVE CAMERA MODE =================
-if mode == "Live Webcam / DroidCam":
+if mode=="Live Webcam / DroidCam":
     st.info("Use a ngrok public URL here if running on Streamlit Cloud")
-    cam_url = st.text_input("Camera URL","http://example.ngrok.io/video")
+    cam_url = st.text_input("Camera URL","http://192.168.1.3:4747/video")
     start = st.checkbox("Start Camera")
+
     if start:
-        col1, col2 = st.columns(2)
+        col1,col2 = st.columns(2)
         cap = cv2.VideoCapture(cam_url)
         if not cap.isOpened():
             st.error("Cannot access camera. Check URL or ngrok link.")
@@ -181,17 +167,17 @@ if mode == "Live Webcam / DroidCam":
                 if not ret:
                     st.error("Camera not accessible")
                     break
-
-                lane_img, lane_found = deep_lane_detection(frame)
-                if not lane_found:
-                    insert_detection("Lane Missing", 0.0, "", user_lat, user_lon)
-
+                # YOLO
                 yolo_frame = frame.copy()
                 boxes,scores,classes = run_tflite_inference(yolo_frame)
-                draw_boxes(yolo_frame, boxes, scores, classes, user_lat, user_lon, conf)
-
-                col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
-                col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
+                draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+                # Lane detection
+                lanes, lane_found = enhanced_lane_detection(frame)
+                if not lane_found:
+                    insert_detection("Lane Missing",0.0,"",latitude,longitude)
+                # Display
+                col1.image(lanes,caption="Lane Overlay",channels="BGR")
+                col2.image(yolo_frame,caption="YOLO Detection",channels="BGR")
             cap.release()
 
 # ================= DATABASE VIEW =================
@@ -201,15 +187,16 @@ st.dataframe(df)
 
 # ================= MAP VIEW =================
 st.subheader("🗺️ Map of Detections")
-map_center = [user_lat, user_lon]
-m = folium.Map(location=map_center, zoom_start=14)
+m = folium.Map(location=[latitude, longitude], zoom_start=14)
 for _, row in df.iterrows():
-    if row['class_name']=="Lane Missing":
-        folium.Marker([row['latitude'], row['longitude']],
-                      popup="Lane Missing",
-                      icon=folium.Icon(color='orange', icon='exclamation-sign')).add_to(m)
-    else:
-        folium.Marker([row['latitude'], row['longitude']],
-                      popup=f"{row['class_name']} ({row['confidence']:.2f})",
-                      icon=folium.Icon(color='red', icon='info-sign')).add_to(m)
-st_folium(m, width=700, height=500)
+    if pd.notnull(row['latitude']) and pd.notnull(row['longitude']):
+        if row['class_name']=="Lane Missing":
+            folium.Marker([row['latitude'], row['longitude']],
+                          popup="Lane Missing",
+                          icon=folium.Icon(color='orange',icon='exclamation-sign')).add_to(m)
+        else:
+            folium.Marker([row['latitude'], row['longitude']],
+                          popup=f"{row['class_name']} ({row['confidence']:.2f})",
+                          icon=folium.Icon(color='red',icon='info-sign')).add_to(m)
+
+st_folium(m,width=700,height=500)
