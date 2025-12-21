@@ -6,8 +6,10 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
+from streamlit_folium import st_folium
+import folium
 
-st.set_page_config(page_title="RQI — YOLO + Lane Detection", layout="wide")
+st.set_page_config(page_title="RQI — YOLO + DeepLaneNet + Map", layout="wide")
 
 # =====================================================
 # DATABASE
@@ -49,7 +51,7 @@ def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     conn.commit()
 
 # =====================================================
-# LOAD TFLITE
+# LOAD TFLITE YOLO MODEL
 # =====================================================
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -66,15 +68,28 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # =====================================================
-# LANE DETECTION
+# LANE DETECTION FUNCTION (DeepLaneNet placeholder)
 # =====================================================
-def enhanced_lane_detection(frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    white = cv2.inRange(hsv, (0,0,180),(180,40,255))
-    yellow = cv2.inRange(hsv, (15,70,70),(35,255,255))
-    mask = cv2.bitwise_or(white,yellow)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
-    return cv2.applyColorMap(mask, cv2.COLORMAP_HOT)
+def deep_lane_detection(frame):
+    """
+    Placeholder for actual DeepLaneNet lane detection.
+    Returns lane image and lane_found boolean.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    edges = cv2.Canny(blur, 50, 150)
+    
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, 50, minLineLength=100, maxLineGap=50)
+    lane_img = np.zeros_like(frame)
+    
+    if lines is None or len(lines)==0:
+        return lane_img, False  # Lane missing
+    
+    for line in lines:
+        x1,y1,x2,y2 = line[0]
+        cv2.line(lane_img,(x1,y1),(x2,y2),(0,255,0),5)
+    
+    return lane_img, True
 
 # =====================================================
 # YOLO HELPERS
@@ -116,11 +131,11 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
 # =====================================================
 # UI
 # =====================================================
-st.title("🚧 RQI ")
+st.title("🚧 RQI — YOLO + DeepLaneNet + Map")
 
 mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
 conf = st.sidebar.slider("Confidence Threshold",0.1,1.0,0.3,0.05)
-st.sidebar.subheader("GPS (optional)")
+st.sidebar.subheader("GPS (required for map)")
 latitude = st.sidebar.number_input("Latitude",0.0,format="%.6f")
 longitude = st.sidebar.number_input("Longitude",0.0,format="%.6f")
 
@@ -129,12 +144,22 @@ if mode=="Upload Image":
     uploaded = st.file_uploader("Upload Road Image",["jpg","png","jpeg"])
     if uploaded and st.button("Run Detection"):
         frame = np.array(Image.open(uploaded).convert("RGB"))
+        
+        # DeepLaneNet Detection
+        lane_img, lane_found = deep_lane_detection(frame)
+        if not lane_found:
+            st.warning("⚠️ Lane Missing!")
+            insert_detection("Lane Missing", 0.0, "", latitude, longitude)
+        
+        # YOLO Detection
         yolo_frame = frame.copy()
         boxes,scores,classes = run_tflite_inference(yolo_frame)
         draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
-        lanes = enhanced_lane_detection(yolo_frame)
-        left_img = cv2.addWeighted(yolo_frame,0.7,lanes,0.5,0)
-        st.image(left_img,caption="YOLO + Lane Overlay",channels="BGR")
+
+        # Show side-by-side
+        col1, col2 = st.columns(2)
+        col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
+        col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
 
 # ================= LIVE CAMERA MODE =================
 if mode=="Live Webcam / DroidCam":
@@ -143,7 +168,7 @@ if mode=="Live Webcam / DroidCam":
     start = st.checkbox("Start Camera")
 
     if start:
-        frame_box = st.empty()
+        col1, col2 = st.columns(2)
         cap = cv2.VideoCapture(cam_url)
         if not cap.isOpened():
             st.error("Cannot access camera. Check URL or ngrok link.")
@@ -153,14 +178,41 @@ if mode=="Live Webcam / DroidCam":
                 if not ret:
                     st.error("Camera not accessible")
                     break
-                boxes,scores,classes = run_tflite_inference(frame)
-                draw_boxes(frame, boxes, scores, classes, latitude, longitude, conf)
-                lanes = enhanced_lane_detection(frame)
-                blended = cv2.addWeighted(frame,0.7,lanes,0.5,0)
-                frame_box.image(blended,channels="BGR")
+
+                # DeepLaneNet
+                lane_img, lane_found = deep_lane_detection(frame)
+                if not lane_found:
+                    insert_detection("Lane Missing", 0.0, "", latitude, longitude)
+
+                # YOLO
+                yolo_frame = frame.copy()
+                boxes,scores,classes = run_tflite_inference(yolo_frame)
+                draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+
+                # Display
+                col1.image(lane_img, caption="DeepLaneNet Output", channels="BGR")
+                col2.image(yolo_frame, caption="YOLO Detection", channels="BGR")
+
             cap.release()
 
 # ================= DATABASE VIEW =================
 st.subheader("📋 Detection Log")
 df = pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn)
 st.dataframe(df)
+
+# ================= MAP VIEW =================
+st.subheader("🗺️ Map of Detections")
+map_center = [latitude, longitude] if latitude !=0 and longitude !=0 else [20.5937,78.9629]  # Default India
+m = folium.Map(location=map_center, zoom_start=14)
+
+for _, row in df.iterrows():
+    if row['class_name']=="Lane Missing":
+        folium.Marker([row['latitude'], row['longitude']],
+                      popup="Lane Missing",
+                      icon=folium.Icon(color='orange', icon='exclamation-sign')).add_to(m)
+    else:
+        folium.Marker([row['latitude'], row['longitude']],
+                      popup=f"{row['class_name']} ({row['confidence']:.2f})",
+                      icon=folium.Icon(color='red', icon='info-sign')).add_to(m)
+
+st_data = st_folium(m, width=700, height=500)
