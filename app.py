@@ -7,7 +7,7 @@ import datetime
 import os
 import pandas as pd
 
-st.set_page_config(page_title="RQI — YOLO + Lane Detection", layout="wide")
+st.set_page_config(page_title="RQI — YOLO + Lane + Map", layout="wide")
 
 # =====================================================
 # DATABASE
@@ -50,7 +50,7 @@ def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     conn.commit()
 
 # =====================================================
-# LOAD TFLITE
+# LOAD TFLITE MODEL
 # =====================================================
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -66,35 +66,20 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
+st.success(f"Loaded model: {MODEL_PATH}")
+
 # =====================================================
-# LANE DETECTION
+# LANE DETECTION (VISUAL ONLY)
 # =====================================================
 def enhanced_lane_detection(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     white = cv2.inRange(hsv, (0, 0, 180), (180, 40, 255))
     yellow = cv2.inRange(hsv, (15, 70, 70), (35, 255, 255))
     mask = cv2.bitwise_or(white, yellow)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
-    return mask
-
-def lanes_are_continuous(mask, max_gap=20):
-    """
-    Internal logic only (NO visualization)
-    Returns False if any lane row has large gaps
-    """
-    h, w = mask.shape
-    for y in range(h):
-        row = mask[y]
-        lane_pixels = np.where(row > 0)[0]
-        if len(lane_pixels) < 2:
-            continue
-        gaps = np.diff(lane_pixels)
-        if np.max(gaps) > max_gap:
-            return False
-    return True
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
 
 # =====================================================
-# YOLO HELPERS
+# YOLO INFERENCE
 # =====================================================
 def preprocess_for_tflite(frame):
     h, w = input_details[0]["shape"][1:3]
@@ -104,8 +89,10 @@ def preprocess_for_tflite(frame):
     return np.expand_dims(img, axis=0)
 
 def run_tflite_inference(frame):
-    inp = preprocess_for_tflite(frame)
-    interpreter.set_tensor(input_details[0]["index"], inp)
+    interpreter.set_tensor(
+        input_details[0]["index"],
+        preprocess_for_tflite(frame)
+    )
     interpreter.invoke()
     out = interpreter.get_tensor(output_details[0]["index"])[0]
     if out.size == 0:
@@ -116,77 +103,94 @@ COLORS = [(0,255,0),(255,255,0),(255,0,255)]
 
 def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
     h, w, _ = frame.shape
-    detected_positions = []
+    coords = []
 
-    for i in range(len(scores)):
-        if scores[i] < threshold:
+    for i, s in enumerate(scores):
+        if s < threshold:
             continue
 
         x1,y1,x2,y2 = boxes[i]
         x1,x2 = int(x1*w), int(x2*w)
         y1,y2 = int(y1*h), int(y2*h)
-
         cid = int(classes[i])
-        cv2.rectangle(frame, (x1,y1), (x2,y2), COLORS[cid % 3], 2)
+
+        cv2.rectangle(frame,(x1,y1),(x2,y2),COLORS[cid%3],2)
 
         crop = frame[y1:y2, x1:x2]
-        if crop.size > 0:
+        if crop.size:
             path = f"{SNAPSHOT_FOLDER}/{CLASS_NAMES[cid]}_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
             cv2.imwrite(path, crop)
-            insert_detection(CLASS_NAMES[cid], float(scores[i]), path, lat, lon)
-            detected_positions.append((lat, lon))
+            insert_detection(CLASS_NAMES[cid], float(s), path, lat, lon)
+            coords.append((lat, lon))
 
-    return detected_positions
+    return coords
 
 # =====================================================
 # UI
 # =====================================================
-st.title("🚧 RQI — YOLO + Lane Detection")
+st.title("🚧 RQI — YOLO + Lane Overlay + Map")
 
 mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
 conf = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.3, 0.05)
 
-st.sidebar.subheader("GPS (optional)")
-latitude = st.sidebar.number_input("Latitude", 0.0, format="%.6f")
-longitude = st.sidebar.number_input("Longitude", 0.0, format="%.6f")
+st.sidebar.subheader("📍 GPS Coordinates (Required for Map)")
+lat_txt = st.sidebar.text_input("Latitude")
+lon_txt = st.sidebar.text_input("Longitude")
+
+def get_gps():
+    try:
+        return float(lat_txt), float(lon_txt)
+    except:
+        return None, None
 
 # =====================================================
-# UPLOAD IMAGE MODE
+# IMAGE MODE
 # =====================================================
 if mode == "Upload Image":
-    uploaded = st.file_uploader("Upload Road Image", ["jpg","png","jpeg"])
+    img = st.file_uploader("Upload road image", ["jpg","jpeg","png"])
 
-    if uploaded and st.button("Run Detection"):
-        frame = np.array(Image.open(uploaded).convert("RGB"))
+    if img and st.button("Run Detection"):
+        frame = np.array(Image.open(img).convert("RGB"))
+        overlay = frame.copy()
 
-        yolo_frame = frame.copy()
-        boxes, scores, classes = run_tflite_inference(yolo_frame)
+        boxes, scores, classes = run_tflite_inference(overlay)
+        lane_mask = enhanced_lane_detection(overlay)
 
-        lane_mask = enhanced_lane_detection(yolo_frame)
+        lat, lon = get_gps()
+        coords = []
 
-        # Detect potholes ONLY if lanes continuous
-        if lanes_are_continuous(lane_mask):
-            draw_boxes(yolo_frame, boxes, scores, classes, latitude, longitude, conf)
+        if lat is not None:
+            coords = draw_boxes(
+                overlay, boxes, scores, classes, lat, lon, conf
+            )
 
-        overlay = cv2.addWeighted(
-            yolo_frame, 0.7,
+        final_img = cv2.addWeighted(
+            overlay, 0.7,
             cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
         )
 
-        st.image(overlay, caption="YOLO + Lane Overlay", channels="BGR")
+        st.image(final_img, caption="YOLO + Lane Overlay", channels="BGR")
+
+        if coords:
+            st.subheader("🗺️ Pothole Location")
+            st.map(pd.DataFrame(coords, columns=["lat","lon"]))
+        else:
+            st.info("No potholes detected or GPS not provided")
 
 # =====================================================
 # LIVE CAMERA MODE
 # =====================================================
 if mode == "Live Webcam / DroidCam":
-    cam_url = st.text_input("Camera URL", "http://192.168.1.3:4747/video")
+    cam_url = st.text_input("Camera Stream URL")
     start = st.checkbox("Start Camera")
 
     if start:
         cap = cv2.VideoCapture(cam_url)
         frame_box = st.empty()
         map_box = st.empty()
-        detected_coords = []
+        detected = []
+
+        lat, lon = get_gps()
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -194,29 +198,24 @@ if mode == "Live Webcam / DroidCam":
                 st.error("Camera not accessible")
                 break
 
+            boxes, scores, classes = run_tflite_inference(frame)
             lane_mask = enhanced_lane_detection(frame)
 
-            # Detect + map ONLY if lanes continuous
-            if lanes_are_continuous(lane_mask):
+            if lat is not None:
                 coords = draw_boxes(
-                    frame,
-                    *run_tflite_inference(frame),
-                    latitude,
-                    longitude,
-                    conf
+                    frame, boxes, scores, classes, lat, lon, conf
                 )
-                detected_coords.extend(coords)
+                detected.extend(coords)
 
-            overlay = cv2.addWeighted(
+            blended = cv2.addWeighted(
                 frame, 0.7,
                 cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
             )
 
-            frame_box.image(overlay, channels="BGR")
+            frame_box.image(blended, channels="BGR")
 
-            if detected_coords:
-                map_df = pd.DataFrame(detected_coords, columns=["lat", "lon"])
-                map_box.map(map_df)
+            if detected:
+                map_box.map(pd.DataFrame(detected, columns=["lat","lon"]))
 
         cap.release()
 
@@ -224,5 +223,6 @@ if mode == "Live Webcam / DroidCam":
 # DATABASE VIEW
 # =====================================================
 st.subheader("📋 Detection Log")
-df = pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn)
-st.dataframe(df)
+st.dataframe(pd.read_sql(
+    "SELECT * FROM pothole_events ORDER BY id DESC", conn
+))
