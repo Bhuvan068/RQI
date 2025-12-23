@@ -6,7 +6,6 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
-import time
 
 st.set_page_config(page_title="RQI — YOLO + Lane + Map", layout="wide")
 
@@ -33,9 +32,7 @@ conn.commit()
 # SNAPSHOTS
 # =====================================================
 SNAPSHOT_FOLDER = "snapshots"
-CLIP_FOLDER = "clips"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
-os.makedirs(CLIP_FOLDER, exist_ok=True)
 
 def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     cursor.execute("""
@@ -82,7 +79,7 @@ def enhanced_lane_detection(frame):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
 
 # =====================================================
-# YOLO TFLITE
+# YOLO 
 # =====================================================
 def preprocess_for_tflite(frame):
     h, w = input_details[0]["shape"][1:3]
@@ -183,44 +180,101 @@ if mode == "Upload Image":
 # =====================================================
 # LIVE CAMERA MODE
 # =====================================================
-if mode == "ip Webcam ":
-    cam_url = st.text_input("Camera Stream URL", placeholder="http://192.168.1.3:8080/video")
-    start = st.checkbox("▶ Start Camera")
-    pause = st.checkbox("⏸ Pause Detection")
+
+if mode == "Live Webcam / DroidCam":
+    cam_url = st.text_input(
+        "Camera Stream URL",
+        placeholder="http://192.168.1.3:8080/video"
+    )
+
+    colA, colB = st.columns(2)
+    with colA:
+        start = st.checkbox("▶ Start Camera")
+    with colB:
+        pause = st.checkbox("⏸ Pause Detection")
 
     frame_box = st.empty()
     map_box = st.empty()
-    detected = []
 
     if start and cam_url:
-        cap = cv2.VideoCapture(cam_url)
+        cap = cv2.VideoCapture(cam_url, cv2.CAP_FFMPEG)
+
         lat, lon = get_gps()
+        detected = []
+
+        # --- Video clip variables ---
+        recording = False
+        clip_frames = []
+        clip_start_time = None
+        CLIP_DURATION = 5  # seconds
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0:
+            fps = 20
 
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret or frame is None:
+            if not ret:
                 st.error("Camera not accessible")
                 break
 
-            lane_mask = enhanced_lane_detection(frame)
-
-            if not pause and lat is not None:
+            if not pause:
                 boxes, scores, classes = run_tflite_inference(frame)
-                coords = draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
-                if coords:
-                    detected.extend(coords)
+                lane_mask = enhanced_lane_detection(frame)
 
-            blended = cv2.addWeighted(frame, 0.7, cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0)
-            frame_box.image(blended, channels="BGR", use_column_width=True)
+                if lat is not None:
+                    coords = draw_boxes(
+                        frame, boxes, scores, classes, lat, lon, conf
+                    )
+                    if coords:
+                        detected.extend(coords)
+
+                        # Start recording clip
+                        if not recording:
+                            recording = True
+                            clip_frames = []
+                            clip_start_time = datetime.datetime.now()
+
+                # Save clip frames
+                if recording:
+                    clip_frames.append(frame.copy())
+                    elapsed = (
+                        datetime.datetime.now() - clip_start_time
+                    ).total_seconds()
+
+                    if elapsed >= CLIP_DURATION:
+                        h, w, _ = frame.shape
+                        clip_name = f"clip_{clip_start_time.strftime('%Y%m%d_%H%M%S')}.mp4"
+                        clip_path = os.path.join(CLIP_FOLDER, clip_name)
+
+                        out = cv2.VideoWriter(
+                            clip_path,
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            fps,
+                            (w, h)
+                        )
+
+                        for f in clip_frames:
+                            out.write(f)
+                        out.release()
+
+                        recording = False
+                        clip_frames = []
+                        st.success(f"🎥 Saved clip: {clip_name}")
+
+            # Always show video (even when paused)
+            lane_mask = enhanced_lane_detection(frame)
+            blended = cv2.addWeighted(
+                frame, 0.7,
+                cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
+            )
+
+            frame_box.image(blended, channels="BGR")
 
             if detected:
-                map_box.map(pd.DataFrame(detected, columns=["lat", "lon"]))
-
-            # Break loop if checkbox unchecked
-            if not start:
-                break
-
-            time.sleep(0.05)
+                map_box.map(
+                    pd.DataFrame(detected, columns=["lat", "lon"])
+                )
 
         cap.release()
 
