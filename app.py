@@ -1,3 +1,4 @@
+import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
@@ -282,4 +283,5 @@ if mode == "Live Webcam / DroidCam":
 # =====================================================
 st.subheader("📋 Detection Log")
 st.dataframe(pd.read_sql(
-    "SELECT * FROM pothole_events ORDER BY id DESC", conn))
+    "SELECT * FROM pothole_events ORDER BY id DESC", conn
+))
