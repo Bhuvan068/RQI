@@ -282,5 +282,4 @@ if mode == "Live Webcam / DroidCam":
 # =====================================================
 st.subheader("📋 Detection Log")
 st.dataframe(pd.read_sql(
-    "SELECT * FROM pothole_events ORDER BY id DESC", conn
-))
+    "SELECT * FROM pothole_events ORDER BY id DESC", conn))
