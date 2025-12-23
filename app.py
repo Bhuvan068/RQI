@@ -6,7 +6,6 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
-import tensorflow as tf
 
 st.set_page_config(page_title="RQI — YOLO + Lane + Map", layout="wide")
 
@@ -34,9 +33,6 @@ conn.commit()
 # =====================================================
 SNAPSHOT_FOLDER = "snapshots"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
-
-CLIP_FOLDER = "clips"
-os.makedirs(CLIP_FOLDER, exist_ok=True)
 
 def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     cursor.execute("""
@@ -83,55 +79,25 @@ def enhanced_lane_detection(frame):
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
 
 # =====================================================
-# YOLO TFLITE INFERENCE
+# YOLO 
 # =====================================================
-def run_tflite_inference(frame, conf_thres=0.25, iou_thres=0.45):
-    ih, iw = frame.shape[:2]
-    input_h, input_w = input_details[0]["shape"][1:3]
-
-    # Letterbox resize
-    scale = min(input_w / iw, input_h / ih)
-    nw, nh = int(iw * scale), int(ih * scale)
-
-    resized = cv2.resize(frame, (nw, nh))
-    canvas = np.full((input_h, input_w, 3), 114, dtype=np.uint8)
-    canvas[:nh, :nw] = resized
-
-    img = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+def preprocess_for_tflite(frame):
+    h, w = input_details[0]["shape"][1:3]
+    img = cv2.resize(frame, (w, h))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     img = img.astype(np.float32) / 255.0
-    img = np.expand_dims(img, 0)
+    return np.expand_dims(img, axis=0)
 
-    interpreter.set_tensor(input_details[0]["index"], img)
+def run_tflite_inference(frame):
+    interpreter.set_tensor(
+        input_details[0]["index"],
+        preprocess_for_tflite(frame)
+    )
     interpreter.invoke()
-
-    preds = interpreter.get_tensor(output_details[0]["index"])[0]
-
-    boxes, scores, classes = [], [], []
-
-    for det in preds:
-        conf = det[4]
-        if conf < conf_thres:
-            continue
-
-        xc, yc, w, h = det[:4]
-
-        # Convert to corner format
-        x1 = (xc - w / 2) * input_w
-        y1 = (yc - h / 2) * input_h
-        x2 = (xc + w / 2) * input_w
-        y2 = (yc + h / 2) * input_h
-
-        # Undo letterbox
-        x1 = max(0, min((x1) / scale, iw))
-        y1 = max(0, min((y1) / scale, ih))
-        x2 = max(0, min((x2) / scale, iw))
-        y2 = max(0, min((y2) / scale, ih))
-
-        boxes.append([x1 / iw, y1 / ih, x2 / iw, y2 / ih])
-        scores.append(float(conf))
-        classes.append(int(det[5]))
-
-    return np.array(boxes), np.array(scores), np.array(classes)
+    out = interpreter.get_tensor(output_details[0]["index"])[0]
+    if out.size == 0:
+        return [], [], []
+    return out[:, :4], out[:, 4], out[:, 5]
 
 COLORS = [(0,255,0),(255,255,0),(255,0,255)]
 
@@ -187,7 +153,7 @@ if mode == "Upload Image":
         frame = np.array(Image.open(img).convert("RGB"))
         overlay = frame.copy()
 
-        boxes, scores, classes = run_tflite_inference(overlay, conf)
+        boxes, scores, classes = run_tflite_inference(overlay)
         lane_mask = enhanced_lane_detection(overlay)
 
         lat, lon = get_gps()
@@ -214,6 +180,7 @@ if mode == "Upload Image":
 # =====================================================
 # LIVE CAMERA MODE
 # =====================================================
+
 if mode == "Live Webcam / DroidCam":
     cam_url = st.text_input(
         "Camera Stream URL",
@@ -235,6 +202,7 @@ if mode == "Live Webcam / DroidCam":
         lat, lon = get_gps()
         detected = []
 
+        # --- Video clip variables ---
         recording = False
         clip_frames = []
         clip_start_time = None
@@ -251,7 +219,7 @@ if mode == "Live Webcam / DroidCam":
                 break
 
             if not pause:
-                boxes, scores, classes = run_tflite_inference(frame, conf)
+                boxes, scores, classes = run_tflite_inference(frame)
                 lane_mask = enhanced_lane_detection(frame)
 
                 if lat is not None:
@@ -260,14 +228,19 @@ if mode == "Live Webcam / DroidCam":
                     )
                     if coords:
                         detected.extend(coords)
+
+                        # Start recording clip
                         if not recording:
                             recording = True
                             clip_frames = []
                             clip_start_time = datetime.datetime.now()
 
+                # Save clip frames
                 if recording:
                     clip_frames.append(frame.copy())
-                    elapsed = (datetime.datetime.now() - clip_start_time).total_seconds()
+                    elapsed = (
+                        datetime.datetime.now() - clip_start_time
+                    ).total_seconds()
 
                     if elapsed >= CLIP_DURATION:
                         h, w, _ = frame.shape
@@ -289,9 +262,11 @@ if mode == "Live Webcam / DroidCam":
                         clip_frames = []
                         st.success(f"🎥 Saved clip: {clip_name}")
 
+            # Always show video (even when paused)
+            lane_mask = enhanced_lane_detection(frame)
             blended = cv2.addWeighted(
                 frame, 0.7,
-                cv2.cvtColor(enhanced_lane_detection(frame), cv2.COLOR_GRAY2BGR), 0.5, 0
+                cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
             )
 
             frame_box.image(blended, channels="BGR")
