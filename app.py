@@ -73,35 +73,33 @@ st.success(f"Loaded model: {MODEL_PATH}")
 # MISSING LANE DETECTION (EDGE-BASED)
 # =====================================================
 def detect_missing_lane_edges(frame):
+    def detect_missing_lane_edges(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
     edges = cv2.Canny(blur, 50, 150)
 
     h, w = edges.shape
-    roi = np.zeros_like(edges)
-    roi[int(h*0.5):h, :] = 255
-    edges = cv2.bitwise_and(edges, roi)
+    roi = edges[int(h*0.5):h, :]   # lower half only
 
     gap_mask = np.zeros_like(edges)
     missing = False
 
-    strip_w = 5
-    strip_h = 12
-    edge_thresh = 5
+    window_h = 12
+    threshold = 8  # edge pixel count threshold
 
-    for x in range(60, w-60, strip_w):
-        for y in range(int(h*0.55), h, strip_h):
-            block = edges[y:y+strip_h, x:x+strip_w]
-            if np.sum(block > 0) < edge_thresh:
-                gap_mask[y:y+strip_h, x:x+strip_w] = 255
+    for x in range(0, w, 8):
+        for y in range(0, roi.shape[0] - window_h, window_h):
+            patch = roi[y:y+window_h, x:x+8]
+            if np.sum(patch > 0) < threshold:
+                gap_mask[int(h*0.5)+y:int(h*0.5)+y+window_h, x:x+8] = 255
                 missing = True
 
-    gap_mask = cv2.dilate(gap_mask, np.ones((3,3),np.uint8), 1)
-
     overlay = frame.copy()
-    overlay[gap_mask == 255] = [255, 0, 0]
+    overlay[gap_mask == 255] = [0, 0, 255]  # red pixels only
 
     return overlay, missing
+
 
 # =====================================================
 # YOLO
@@ -200,27 +198,56 @@ if mode == "Live Webcam / DroidCam":
         cap = cv2.VideoCapture(cam_url)
         lat, lon = get_gps()
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+       while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        st.error("Camera not accessible")
+        break
 
-            if not pause:
-                boxes, scores, classes = run_tflite_inference(frame)
-                if lat is not None:
-                    draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
+    yolo_view = frame.copy()
 
-                lane_overlay, missing = detect_missing_lane_edges(frame)
+    if not pause:
+        # ---------------- YOLO ----------------
+        boxes, scores, classes = run_tflite_inference(frame)
+        lat, lon = get_gps()
 
-                if missing and lat is not None and time.time() - last_save > 5:
-                    path = f"{SNAPSHOT_FOLDER}/FadedLane_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
-                    cv2.imwrite(path, lane_overlay)
-                    insert_detection("Faded Lane", 1.0, path, lat, lon)
-                    last_save = time.time()
+        if lat is not None:
+            coords = draw_boxes(
+                yolo_view, boxes, scores, classes, lat, lon, conf
+            )
+            if coords:
+                detected.extend(coords)
 
-                frame_box.image(lane_overlay, channels="BGR")
+        lane_mask = enhanced_lane_detection(frame)
+        yolo_lane = cv2.addWeighted(
+            yolo_view, 0.7,
+            cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
+        )
 
-        cap.release()
+        # ---------------- MISSING LANE ----------------
+        missing_lane_view, missing_detected = detect_missing_lane_edges(frame)
+
+        if missing_detected and lat is not None:
+            snap = f"{SNAPSHOT_FOLDER}/FadedLane_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
+            cv2.imwrite(snap, missing_lane_view)
+            insert_detection("Faded Lane", 1.0, snap, lat, lon)
+
+    else:
+        yolo_lane = frame
+        missing_lane_view = frame
+
+    # ---------------- DISPLAY SIDE BY SIDE ----------------
+    col1, col2 = frame_box.columns(2)
+
+    with col1:
+        st.image(yolo_lane, channels="BGR", caption="YOLO + Lane Overlay")
+
+    with col2:
+        st.image(missing_lane_view, channels="BGR", caption="Missing Lane (Edge Gaps)")
+
+    if detected:
+        map_box.map(pd.DataFrame(detected, columns=["lat", "lon"]))
+
 
 # =====================================================
 # DATABASE VIEW
