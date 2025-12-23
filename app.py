@@ -183,50 +183,44 @@ if mode == "Upload Image":
 # =====================================================
 # LIVE CAMERA MODE
 # =====================================================
-if mode == "Live Webcam / DroidCam":
-    cam_url = st.text_input(
-        "Camera Stream URL",
-        placeholder="http://192.168.1.3:8080/video"
-    )
-
+if mode == "ip Webcam ":
+    cam_url = st.text_input("Camera Stream URL", placeholder="http://192.168.1.3:8080/video")
     start = st.checkbox("▶ Start Camera")
     pause = st.checkbox("⏸ Pause Detection")
 
     frame_box = st.empty()
     map_box = st.empty()
+    detected = []
 
     if start and cam_url:
         cap = cv2.VideoCapture(cam_url)
-
         lat, lon = get_gps()
-        detected = []
 
-        while True:
+        while cap.isOpened():
             ret, frame = cap.read()
-            if not ret:
+            if not ret or frame is None:
                 st.error("Camera not accessible")
                 break
 
             lane_mask = enhanced_lane_detection(frame)
 
-            if not pause:
+            if not pause and lat is not None:
                 boxes, scores, classes = run_tflite_inference(frame)
-                if lat is not None:
-                    coords = draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
-                    if coords:
-                        detected.extend(coords)
+                coords = draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
+                if coords:
+                    detected.extend(coords)
 
             blended = cv2.addWeighted(frame, 0.7, cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0)
-            frame_box.image(blended, channels="BGR")
+            frame_box.image(blended, channels="BGR", use_column_width=True)
 
             if detected:
                 map_box.map(pd.DataFrame(detected, columns=["lat", "lon"]))
 
-            # Stop the loop gracefully
+            # Break loop if checkbox unchecked
             if not start:
                 break
 
-            time.sleep(0.05)  # small delay to allow UI update
+            time.sleep(0.05)
 
         cap.release()
 
