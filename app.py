@@ -1,5 +1,3 @@
-
-
 import streamlit as st
 import cv2
 import numpy as np
@@ -8,13 +6,12 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
-import json
 import tensorflow as tf
 
 st.set_page_config(page_title="RQI — YOLO + Lane + Map", layout="wide")
 
 # =====================================================
-# DATABASE (SQLite – lightweight & portable)
+# DATABASE
 # =====================================================
 conn = sqlite3.connect("potholes.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -33,17 +30,17 @@ CREATE TABLE IF NOT EXISTS pothole_events (
 conn.commit()
 
 # =====================================================
-# STORAGE
+# FOLDERS
 # =====================================================
 SNAPSHOT_FOLDER = "snapshots"
 CLIP_FOLDER = "clips"
 os.makedirs(SNAPSHOT_FOLDER, exist_ok=True)
 os.makedirs(CLIP_FOLDER, exist_ok=True)
 
+# =====================================================
+# DB INSERT
+# =====================================================
 def insert_detection(class_name, confidence, snapshot_path, lat, lon):
-    """
-    Stores detection metadata for GIS / analytics usage
-    """
     cursor.execute("""
         INSERT INTO pothole_events
         (timestamp, class_name, confidence, snapshot_path, latitude, longitude)
@@ -59,7 +56,7 @@ def insert_detection(class_name, confidence, snapshot_path, lat, lon):
     conn.commit()
 
 # =====================================================
-# LOAD YOLO TFLITE MODEL
+# LOAD TFLITE MODEL
 # =====================================================
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -72,17 +69,15 @@ CLASS_NAMES = ["Pothole", "Crack", "Faded Lane"]
 
 interpreter = Interpreter(model_path=MODEL_PATH)
 interpreter.allocate_tensors()
-
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 st.success(f"Loaded model: {MODEL_PATH}")
 
 # =====================================================
-# NON-MAX SUPPRESSION (Pure NumPy)
-# Removes duplicate overlapping detections
+# NMS
 # =====================================================
-def nms_numpy(boxes, scores, iou_thresh=0.45):
+def nms_numpy(boxes, scores, iou_threshold=0.45):
     if len(boxes) == 0:
         return []
 
@@ -100,28 +95,23 @@ def nms_numpy(boxes, scores, iou_thresh=0.45):
         xx2 = np.minimum(x2[i], x2[order[1:]])
         yy2 = np.minimum(y2[i], y2[order[1:]])
 
-        inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+        w = np.maximum(0, xx2 - xx1)
+        h = np.maximum(0, yy2 - yy1)
+        inter = w * h
         iou = inter / (areas[i] + areas[order[1:]] - inter)
 
-        order = order[np.where(iou <= iou_thresh)[0] + 1]
+        inds = np.where(iou <= iou_threshold)[0]
+        order = order[inds + 1]
 
     return keep
 
 # =====================================================
-# YOLO TFLITE INFERENCE (Correct decoding)
+# YOLO TFLITE (CORRECT)
 # =====================================================
 def run_tflite_inference(frame, conf_thres=0.25):
-    """
-    YOLOv8 TFLite decoding:
-    - Letterbox resize
-    - Center → corner box conversion
-    - NMS filtering
-    """
-
     ih, iw = frame.shape[:2]
     input_h, input_w = input_details[0]["shape"][1:3]
 
-    # Letterbox resize (keeps aspect ratio)
     scale = min(input_w / iw, input_h / ih)
     nw, nh = int(iw * scale), int(ih * scale)
 
@@ -146,17 +136,12 @@ def run_tflite_inference(frame, conf_thres=0.25):
 
         xc, yc, w, h = det[:4]
 
-        # Center → corner
-        x1 = (xc - w / 2) * input_w
-        y1 = (yc - h / 2) * input_h
-        x2 = (xc + w / 2) * input_w
-        y2 = (yc + h / 2) * input_h
+        x1 = (xc - w/2) * input_w / scale
+        y1 = (yc - h/2) * input_h / scale
+        x2 = (xc + w/2) * input_w / scale
+        y2 = (yc + h/2) * input_h / scale
 
-        # Undo letterbox
-        x1, x2 = x1 / scale, x2 / scale
-        y1, y2 = y1 / scale, y2 / scale
-
-        boxes.append([x1 / iw, y1 / ih, x2 / iw, y2 / ih])
+        boxes.append([x1/iw, y1/ih, x2/iw, y2/ih])
         scores.append(float(det[4]))
         classes.append(int(det[5]))
 
@@ -171,136 +156,106 @@ def run_tflite_inference(frame, conf_thres=0.25):
     return boxes[keep], scores[keep], classes[keep]
 
 # =====================================================
-# CLASSICAL CV – Missing Lane Detection (No ML)
+# MISSING LANE (NON-ML)
 # =====================================================
 def detect_missing_lane(frame):
-    """
-    Detects missing lanes using edge continuity.
-    Low continuity = missing lane
-    """
     h, w = frame.shape[:2]
-    roi = frame[int(h * 0.55):h, int(w * 0.15):int(w * 0.85)]
+    roi = frame[int(h*0.6):h, int(w*0.15):int(w*0.85)]
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
 
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180, threshold=80,
-        minLineLength=40, maxLineGap=60
-    )
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, 80, minLineLength=40, maxLineGap=50)
 
     total_len = 0
     if lines is not None:
         for l in lines:
             x1, y1, x2, y2 = l[0]
-            total_len += np.hypot(x2 - x1, y2 - y1)
+            total_len += np.hypot(x2-x1, y2-y1)
 
-    lane_score = total_len / (roi.shape[0] * 2)
-    return lane_score < 0.35
+    score = total_len / (roi.shape[0] * 2)
+    return score < 0.35, score
 
 # =====================================================
-# DRAW DETECTIONS
+# DRAW BOXES (FIXED)
 # =====================================================
 COLORS = [(0,255,0),(255,255,0),(255,0,255)]
 
 def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
-    h, w = frame.shape[:2]
     coords = []
+    h, w = frame.shape[:2]
 
     for i, s in enumerate(scores):
         if s < threshold:
             continue
 
         x1, y1, x2, y2 = boxes[i]
-        x1, x2 = int(x1 * w), int(x2 * w)
-        y1, y2 = int(y1 * h), int(y2 * h)
+        x1 = int(x1 * w)
+        x2 = int(x2 * w)
+        y1 = int(y1 * h)
+        y2 = int(y2 * h)
+
         cid = int(classes[i])
 
-        cv2.rectangle(frame, (x1,y1), (x2,y2), COLORS[cid % 3], 2)
-        label = f"{CLASS_NAMES[cid]} {s:.2f}"
-        cv2.putText(frame, label, (x1, y1-5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS[cid % 3], 2)
+        cv2.rectangle(frame, (x1,y1), (x2,y2), COLORS[cid%3], 2)
 
         crop = frame[y1:y2, x1:x2]
         if crop.size:
             path = f"{SNAPSHOT_FOLDER}/{CLASS_NAMES[cid]}_{datetime.datetime.now().strftime('%H%M%S_%f')}.jpg"
             cv2.imwrite(path, crop)
-            insert_detection(CLASS_NAMES[cid], s, path, lat, lon)
+            insert_detection(CLASS_NAMES[cid], float(s), path, lat, lon)
             coords.append((lat, lon))
 
     return coords
 
 # =====================================================
-# GEOJSON EXPORT
-# =====================================================
-def export_geojson(db_conn):
-    df = pd.read_sql(
-        "SELECT * FROM pothole_events WHERE latitude IS NOT NULL",
-        db_conn
-    )
-
-    features = []
-    for _, r in df.iterrows():
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [r.longitude, r.latitude]
-            },
-            "properties": {
-                "class": r.class_name,
-                "confidence": r.confidence,
-                "timestamp": r.timestamp,
-                "snapshot": r.snapshot_path
-            }
-        })
-
-    return {
-        "type": "FeatureCollection",
-        "features": features
-    }
-
-# =====================================================
 # UI
 # =====================================================
-st.title("🚧 Road Quality Index (RQI)")
+st.title("🚧 RQI (Road Quality Index)")
+mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
+conf = st.sidebar.slider("Confidence Threshold", 0.05, 0.8, 0.25, 0.05)
 
-mode = st.selectbox("Mode", ["Upload Image", "Live Camera"])
-conf = st.sidebar.slider("Confidence", 0.05, 0.8, 0.25, 0.05)
+lat_txt = st.sidebar.text_input("Latitude")
+lon_txt = st.sidebar.text_input("Longitude")
 
-lat = st.sidebar.number_input("Latitude", value=0.0)
-lon = st.sidebar.number_input("Longitude", value=0.0)
+def get_gps():
+    try:
+        return float(lat_txt), float(lon_txt)
+    except:
+        return None, None
 
-# ================= IMAGE MODE =================
+# =====================================================
+# IMAGE MODE
+# =====================================================
 if mode == "Upload Image":
-    img = st.file_uploader("Upload road image", ["jpg","png"])
+    img = st.file_uploader("Upload road image", ["jpg","jpeg","png"])
 
     if img and st.button("Run Detection"):
         frame = cv2.cvtColor(np.array(Image.open(img)), cv2.COLOR_RGB2BGR)
+        overlay = frame.copy()
 
-        boxes, scores, classes = run_tflite_inference(frame, conf)
-        coords = draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
+        boxes, scores, classes = run_tflite_inference(overlay)
+        lat, lon = get_gps()
 
-        if detect_missing_lane(frame):
-            cv2.putText(frame, "MISSING LANE",
-                        (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                        (0,0,255), 3)
+        coords = []
+        if lat is not None:
+            coords = draw_boxes(overlay, boxes, scores, classes, lat, lon, conf)
 
-        st.image(frame, channels="BGR")
+        missing_lane, lane_score = detect_missing_lane(frame)
 
-# ================= EXPORT =================
-st.subheader("🌍 Export")
-if st.button("Export GeoJSON"):
-    geo = export_geojson(conn)
-    st.download_button(
-        "Download GeoJSON",
-        json.dumps(geo, indent=2),
-        "rqi_detections.geojson",
-        "application/geo+json"
-    )
+        col1, col2 = st.columns([3,1])
 
-# ================= DATABASE VIEW =================
+        with col1:
+            st.image(overlay, channels="BGR", caption="YOLO + Lane Overlay")
+
+        with col2:
+            st.subheader("📊 Analysis")
+            st.write(f"Detections: {len(scores)}")
+            st.write(f"Lane continuity score: {lane_score:.2f}")
+            st.error("❌ Missing Lane") if missing_lane else st.success("✅ Lane OK")
+
+# =====================================================
+# DATABASE VIEW
+# =====================================================
 st.subheader("📋 Detection Log")
-st.dataframe(pd.read_sql(
-    "SELECT * FROM pothole_events ORDER BY id DESC", conn
-))
+st.dataframe(pd.read_sql("SELECT * FROM pothole_events ORDER BY id DESC", conn))
