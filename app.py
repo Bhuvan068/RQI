@@ -67,39 +67,41 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-st.success(f"Loaded model: {MODEL_PATH}")
+# =====================================================
+# LANE COLOR MASK
+# =====================================================
+def enhanced_lane_detection(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    white = cv2.inRange(hsv, (0, 0, 180), (180, 40, 255))
+    yellow = cv2.inRange(hsv, (15, 70, 70), (35, 255, 255))
+    mask = cv2.bitwise_or(white, yellow)
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
 
 # =====================================================
-# MISSING LANE DETECTION (EDGE-BASED)
+# MISSING LANE (EDGE LOGIC)
 # =====================================================
 def detect_missing_lane_edges(frame):
-    def detect_missing_lane_edges(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
     edges = cv2.Canny(blur, 50, 150)
 
     h, w = edges.shape
-    roi = edges[int(h*0.5):h, :]   # lower half only
+    roi = edges[int(h * 0.5):, :]
 
     gap_mask = np.zeros_like(edges)
     missing = False
 
-    window_h = 12
-    threshold = 8  # edge pixel count threshold
-
     for x in range(0, w, 8):
-        for y in range(0, roi.shape[0] - window_h, window_h):
-            patch = roi[y:y+window_h, x:x+8]
-            if np.sum(patch > 0) < threshold:
-                gap_mask[int(h*0.5)+y:int(h*0.5)+y+window_h, x:x+8] = 255
+        for y in range(0, roi.shape[0] - 12, 12):
+            patch = roi[y:y+12, x:x+8]
+            if np.sum(patch > 0) < 8:
+                gap_mask[int(h*0.5)+y:int(h*0.5)+y+12, x:x+8] = 255
                 missing = True
 
     overlay = frame.copy()
-    overlay[gap_mask == 255] = [0, 0, 255]  # red pixels only
+    overlay[gap_mask == 255] = [0, 0, 255]
 
     return overlay, missing
-
 
 # =====================================================
 # YOLO
@@ -108,7 +110,7 @@ def preprocess_for_tflite(frame):
     h, w = input_details[0]["shape"][1:3]
     img = cv2.resize(frame, (w, h))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32)/255.0
+    img = img.astype(np.float32) / 255.0
     return np.expand_dims(img, axis=0)
 
 def run_tflite_inference(frame):
@@ -128,6 +130,7 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
     for i, s in enumerate(scores):
         if s < threshold:
             continue
+
         x1,y1,x2,y2 = boxes[i]
         x1,x2 = int(x1*w), int(x2*w)
         y1,y2 = int(y1*h), int(y2*h)
@@ -141,14 +144,15 @@ def draw_boxes(frame, boxes, scores, classes, lat, lon, threshold):
             cv2.imwrite(path, crop)
             insert_detection(CLASS_NAMES[cid], float(s), path, lat, lon)
             coords.append((lat, lon))
+
     return coords
 
 # =====================================================
 # UI
 # =====================================================
 st.title("🚧 RQI (Road Quality Index)")
-mode = st.selectbox("Select Mode", ["Upload Image", "Live Webcam / DroidCam"])
-conf = st.sidebar.slider("Confidence Threshold", 0.1, 1.0, 0.3, 0.05)
+mode = st.selectbox("Mode", ["Upload Image", "Live Webcam / DroidCam"])
+conf = st.sidebar.slider("Confidence", 0.1, 1.0, 0.3)
 
 lat_txt = st.sidebar.text_input("Latitude")
 lon_txt = st.sidebar.text_input("Longitude")
@@ -163,91 +167,55 @@ def get_gps():
 # IMAGE MODE
 # =====================================================
 if mode == "Upload Image":
-    img = st.file_uploader("Upload road image", ["jpg","jpeg","png"])
-    if img and st.button("Run Detection"):
+    img = st.file_uploader("Upload image", ["jpg","png","jpeg"])
+    if img:
         frame = np.array(Image.open(img).convert("RGB"))
         overlay = frame.copy()
 
-        boxes, scores, classes = run_tflite_inference(overlay)
+        boxes, scores, classes = run_tflite_inference(frame)
         lat, lon = get_gps()
         if lat is not None:
             draw_boxes(overlay, boxes, scores, classes, lat, lon, conf)
 
-        lane_overlay, missing = detect_missing_lane_edges(overlay)
+        missing_view, missing = detect_missing_lane_edges(overlay)
 
-        if missing and lat is not None:
-            path = f"{SNAPSHOT_FOLDER}/FadedLane_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
-            cv2.imwrite(path, lane_overlay)
-            insert_detection("Faded Lane", 1.0, path, lat, lon)
-            st.warning("⚠️ Missing lane detected")
-
-        st.image(lane_overlay, channels="BGR")
+        col1, col2 = st.columns(2)
+        col1.image(overlay, channels="BGR", caption="YOLO + Lane")
+        col2.image(missing_view, channels="BGR", caption="Missing Lane")
 
 # =====================================================
-# LIVE CAMERA MODE
+# LIVE MODE
 # =====================================================
 if mode == "Live Webcam / DroidCam":
-    cam_url = st.text_input("Camera Stream URL")
-    start = st.checkbox("▶ Start Camera")
+    cam_url = st.text_input("Camera URL")
+    start = st.checkbox("▶ Start")
     pause = st.checkbox("⏸ Pause")
 
-    frame_box = st.empty()
-    last_save = 0
+    col1, col2 = st.columns(2)
+    detected = []
 
     if start and cam_url:
         cap = cv2.VideoCapture(cam_url)
-        lat, lon = get_gps()
 
-       while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        st.error("Camera not accessible")
-        break
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    yolo_view = frame.copy()
+            yolo_view = frame.copy()
+            lat, lon = get_gps()
 
-    if not pause:
-        # ---------------- YOLO ----------------
-        boxes, scores, classes = run_tflite_inference(frame)
-        lat, lon = get_gps()
+            if not pause:
+                boxes, scores, classes = run_tflite_inference(frame)
+                if lat is not None:
+                    draw_boxes(yolo_view, boxes, scores, classes, lat, lon, conf)
 
-        if lat is not None:
-            coords = draw_boxes(
-                yolo_view, boxes, scores, classes, lat, lon, conf
-            )
-            if coords:
-                detected.extend(coords)
+            missing_view, missing = detect_missing_lane_edges(frame)
 
-        lane_mask = enhanced_lane_detection(frame)
-        yolo_lane = cv2.addWeighted(
-            yolo_view, 0.7,
-            cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
-        )
+            col1.image(yolo_view, channels="BGR", caption="YOLO + Lane")
+            col2.image(missing_view, channels="BGR", caption="Missing Lane")
 
-        # ---------------- MISSING LANE ----------------
-        missing_lane_view, missing_detected = detect_missing_lane_edges(frame)
-
-        if missing_detected and lat is not None:
-            snap = f"{SNAPSHOT_FOLDER}/FadedLane_{datetime.datetime.now().strftime('%H%M%S')}.jpg"
-            cv2.imwrite(snap, missing_lane_view)
-            insert_detection("Faded Lane", 1.0, snap, lat, lon)
-
-    else:
-        yolo_lane = frame
-        missing_lane_view = frame
-
-    # ---------------- DISPLAY SIDE BY SIDE ----------------
-    col1, col2 = frame_box.columns(2)
-
-    with col1:
-        st.image(yolo_lane, channels="BGR", caption="YOLO + Lane Overlay")
-
-    with col2:
-        st.image(missing_lane_view, channels="BGR", caption="Missing Lane (Edge Gaps)")
-
-    if detected:
-        map_box.map(pd.DataFrame(detected, columns=["lat", "lon"]))
-
+            time.sleep(0.03)
 
 # =====================================================
 # DATABASE VIEW
