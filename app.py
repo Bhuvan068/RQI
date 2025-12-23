@@ -185,31 +185,48 @@ if mode == "Upload Image":
 # =====================================================
 # LIVE CAMERA MODE
 # =====================================================
+
 if mode == "Live Webcam / DroidCam":
-    cam_url = st.text_input("Camera URL", "http://192.168.1.3:4747/video")
-    start = st.checkbox("Start Camera")
+    cam_url = st.text_input(
+        "Camera URL",
+        "http://192.168.1.3:4747/video"
+    )
 
-    if start:
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("▶ Start Camera"):
+            st.session_state.camera_running = True
+    with col2:
+        if st.button("⏹ Stop Camera"):
+            st.session_state.camera_running = False
+
+    frame_box = st.empty()
+    lat, lon = get_gps()
+
+    if st.session_state.camera_running:
         cap = cv2.VideoCapture(cam_url)
-        frame_box = st.empty()
-        lat, lon = get_gps()
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Camera not accessible")
-                break
+        if not cap.isOpened():
+            st.error("Camera not accessible")
+        else:
+            while st.session_state.camera_running:
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("Camera stream lost")
+                    break
 
-            boxes, scores, classes = run_tflite_inference(frame)
-            draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
+                # YOLO inference
+                boxes, scores, classes = run_tflite_inference(frame)
+                draw_boxes(frame, boxes, scores, classes, lat, lon, conf)
 
-            lanes = enhanced_lane_detection(frame)
-            blended = cv2.addWeighted(frame, 0.7, lanes, 0.5, 0)
+                # Lane detection
+                lanes = enhanced_lane_detection(frame)
+                blended = cv2.addWeighted(frame, 0.7, lanes, 0.5, 0)
 
-            frame_box.image(blended, channels="BGR")
-            time.sleep(0.03)
+                frame_box.image(blended, channels="BGR")
+                time.sleep(0.03)
 
-        cap.release()
+            cap.release()
 
 # =====================================================
 # DATABASE VIEW
