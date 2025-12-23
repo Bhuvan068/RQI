@@ -3,7 +3,7 @@ opencv-python-headless
 numpy
 pillow
 pandas
-tflite-runtime
+tensorflow
 folium
 streamlit-folium
 requests
