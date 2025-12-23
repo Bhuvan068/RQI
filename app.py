@@ -6,7 +6,6 @@ import sqlite3
 import datetime
 import os
 import pandas as pd
-import requests
 
 st.set_page_config(page_title="RQI — YOLO + Lane + Map", layout="wide")
 
@@ -143,21 +142,6 @@ def get_gps():
         return float(lat_txt), float(lon_txt)
     except:
         return None, None
-def mjpeg_stream_reader(url):
-    response = requests.get(url, stream=True, timeout=10)
-    if response.status_code != 200:
-        raise RuntimeError("Cannot connect to MJPEG stream")
-
-    bytes_data = b""
-    for chunk in response.iter_content(chunk_size=1024):
-        bytes_data += chunk
-        a = bytes_data.find(b'\xff\xd8')  # JPEG start
-        b = bytes_data.find(b'\xff\xd9')  # JPEG end
-        if a != -1 and b != -1:
-            jpg = bytes_data[a:b+2]
-            bytes_data = bytes_data[b+2:]
-            frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
-            yield frame
 
 # =====================================================
 # IMAGE MODE
@@ -194,14 +178,14 @@ if mode == "Upload Image":
             st.info("No potholes detected or GPS not provided")
 
 # =====================================================
-# LIVE CAMERA MODE — STREAMLIT-SAFE MJPEG
+# LIVE CAMERA MODE
 # =====================================================
-import time
+
 
 if mode == "Live Webcam / DroidCam":
     cam_url = st.text_input(
         "Camera Stream URL",
-        value="https://unjoyed-georgann-unattemptable.ngrok-free.dev/video"
+        placeholder="http://192.168.1.3:8080/video"
     )
 
     colA, colB = st.columns(2)
@@ -213,32 +197,38 @@ if mode == "Live Webcam / DroidCam":
     frame_box = st.empty()
     map_box = st.empty()
 
+    # Create clips folder
     CLIP_FOLDER = "clips"
     os.makedirs(CLIP_FOLDER, exist_ok=True)
 
-    # Initialize stop state
-    if "stop_camera" not in st.session_state:
-        st.session_state.stop_camera = False
-
-    if st.button("🛑 Stop Camera"):
-        st.session_state.stop_camera = True
-
     if start and cam_url:
-        lat, lon = get_gps()
-        detected = []
+        cap = cv2.VideoCapture(cam_url)
+        if not cap.isOpened():
+            st.error("Cannot access camera URL. Make sure it's a direct video stream.")
+        else:
+            lat, lon = get_gps()
+            detected = []
 
-        recording = False
-        clip_frames = []
-        clip_start_time = None
-        CLIP_DURATION = 5  # seconds
-        fps = 20
+            # Video clip variables
+            recording = False
+            clip_frames = []
+            clip_start_time = None
+            CLIP_DURATION = 5  # seconds
 
-        try:
-            stream = mjpeg_stream_reader(cam_url)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 20
 
-            for frame in stream:
-                if st.session_state.stop_camera:
-                    st.info("Camera stopped.")
+            stframe = st.empty()  # placeholder for updating frames
+            stop_button = st.button("🛑 Stop Camera")
+
+            while cap.isOpened():
+                if stop_button:
+                    break
+
+                ret, frame = cap.read()
+                if not ret:
+                    st.warning("Failed to get frame from camera.")
                     break
 
                 if not pause:
@@ -279,24 +269,17 @@ if mode == "Live Webcam / DroidCam":
                             clip_frames = []
                             st.success(f"🎥 Saved clip: {clip_name}")
 
-                # Blend lane mask once for display
+                # Always show blended frame
                 lane_mask = enhanced_lane_detection(frame)
-                blended = cv2.addWeighted(
-                    frame, 0.7,
-                    cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0
-                )
-
+                blended = cv2.addWeighted(frame, 0.7, cv2.cvtColor(lane_mask, cv2.COLOR_GRAY2BGR), 0.5, 0)
                 frame_box.image(blended, channels="BGR")
 
                 # Update map if detections exist
                 if detected:
                     map_box.map(pd.DataFrame(detected, columns=["lat", "lon"]))
 
-                # Yield control to Streamlit
-                time.sleep(0.01)
-
-        except Exception as e:
-            st.error(f"Stream error: {e}")
+            cap.release()
+            st.info("Camera stopped.")
 
 # =====================================================
 # DATABASE VIEW
